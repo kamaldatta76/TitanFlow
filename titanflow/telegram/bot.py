@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 from titanflow.config import TelegramConfig
 from titanflow.core.llm_broker import Priority
 from titanflow.core.mem0_client import Mem0Client
+from titanflow.personality import PersonalityStore, build_personality_modifier
 
 logger = logging.getLogger("titanflow.telegram")
 
@@ -529,10 +530,13 @@ class TelegramGateway:
             logger.debug("Gate audit failed", exc_info=True)
 
     async def _llm_chat(self, messages: list[dict[str, str]], *, priority: Priority = Priority.CHAT) -> str:
+        # Read live temperature from PersonalityStore (hot-reloadable)
+        personality = PersonalityStore.get(self._instance_name)
+        temperature = float(personality.get("temperature", 0.7))
         try:
-            return await self.engine.llm.chat(messages=messages, temperature=0.7, priority=priority)
+            return await self.engine.llm.chat(messages=messages, temperature=temperature, priority=priority)
         except TypeError:
-            return await self.engine.llm.chat(messages=messages, temperature=0.7)
+            return await self.engine.llm.chat(messages=messages, temperature=temperature)
 
     @staticmethod
     async def _typing_until_done(chat, task: asyncio.Task) -> None:
@@ -803,6 +807,12 @@ Or just send me a message — I'll think about it."""
             return
 
         sys_prompt = SYSTEM_PROMPTS.get(self._instance_name, SYSTEM_PROMPTS["TitanFlow"])
+
+        # Personality hot-reload: append live modifiers from TitanPortal
+        personality = PersonalityStore.get(self._instance_name)
+        personality_mod = build_personality_modifier(personality)
+        if personality_mod:
+            sys_prompt += personality_mod
 
         # Check for per-user greeting overrides
         user = update.effective_user

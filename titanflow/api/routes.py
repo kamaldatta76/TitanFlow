@@ -1,10 +1,12 @@
-"""TitanFlow API Routes — health checks, status, module control."""
+"""TitanFlow API Routes — health checks, status, module control, personality hot-reload."""
 
 from __future__ import annotations
 
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+
+from titanflow.personality import PersonalityStore
 
 router = APIRouter(prefix="/api", tags=["titanflow"])
 
@@ -54,3 +56,28 @@ async def llm_health(engine=Depends(get_engine), _=Depends(require_api_key)) -> 
 @router.get("/jobs")
 async def scheduled_jobs(engine=Depends(get_engine), _=Depends(require_api_key)) -> list[dict[str, Any]]:
     return engine.scheduler.list_jobs()
+
+
+# ─── Personality Hot-Reload ────────────────────────────────────────────────────
+
+@router.get("/personality")
+async def get_personality(engine=Depends(get_engine), _=Depends(require_api_key)) -> dict[str, Any]:
+    """Return current in-memory personality config for this instance."""
+    return {
+        "instance": engine.config.name,
+        "personality": PersonalityStore.get(engine.config.name),
+    }
+
+
+@router.post("/personality")
+async def set_personality(request: Request, engine=Depends(get_engine), _=Depends(require_api_key)) -> dict[str, Any]:
+    """Hot-reload personality config pushed from TitanPortal (no restart required).
+
+    Accepts the same JSON payload that TitanPortal sends:
+      { slider_silly, slider_chatty, slider_hyper, slider_voices,
+        temperature, top_p, preset, model, context_window,
+        response_length, memory_enabled, plugins }
+    """
+    body = await request.json()
+    PersonalityStore.set(engine.config.name, body)
+    return {"status": "ok", "instance": engine.config.name, "applied": body}
