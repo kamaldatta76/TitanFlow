@@ -149,3 +149,14 @@ This log captures all work completed so far for the TitanFlow v0.3 microkernel s
 
 **Telemetry access fix**
 - Core `RuntimeDirectoryMode` relaxed to `0755` so telemetry HTTP can connect to `/run/titanflow-core/telemetry.sock`.
+
+**Deployment verification**
+- v0.3 core `active (running)` on Sarge.
+- Telemetry HTTP responds: `curl http://127.0.0.1:19100/status` → JSON snapshot.
+- Gateway responds: `curl http://127.0.0.1:18888/health` → `{"status":"ok"}`.
+- Telemetry socket unit disabled (core owns socket).
+
+**Backups**
+- Updated deploy package:
+  - `/Users/kamaldatta/Documents/TitanArray/Backups/TitanFlow/Charlie/2026-02-28/titanflow-v03-deploy-package.tar.gz`
+  - SHA256 stored alongside as `.sha256`.
