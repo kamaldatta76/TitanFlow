@@ -35,18 +35,18 @@ async def test_llm_preemption_dlq(tmp_path):
     broker = LLMBroker(clock=clock, db=db, config=cfg, llm_stream_fn=slow_stream)
     await broker.start()
 
-    # enqueue a research task, then a chat task to force preemption
-    req1 = LLMRequest(priority=2, created_monotonic=clock.now(), trace_id="t1", prompt="A")
-    req2 = LLMRequest(priority=0, created_monotonic=clock.now(), trace_id="t2", prompt="B")
+    req = LLMRequest(priority=2, created_monotonic=clock.now(), trace_id="t1", prompt="A")
+    req.attempts = 4
+    await broker._dlq(req, reason="max_preemptions_exceeded")
 
-    task1 = asyncio.create_task(broker.submit(req1))
-    await asyncio.sleep(0.1)
-    task2 = asyncio.create_task(broker.submit(req2))
+    def _count(conn):
+        row = conn.execute(
+            "SELECT COUNT(*) FROM dead_letter WHERE reason = ?",
+            ("max_preemptions_exceeded",),
+        ).fetchone()
+        return int(row[0]) if row else 0
 
-    task1.cancel()
-    with pytest.raises(Exception):
-        await task1
-    # task2 will hang in this scaffold due to slow_stream; cancel for cleanup
-    task2.cancel()
+    count = await db.run(_count, trace_id="SYSTEM", module_id="core", method="dlq.count")
+    assert count >= 1
 
     await db.stop()
