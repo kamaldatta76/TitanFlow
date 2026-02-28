@@ -48,3 +48,7 @@ Thumbs.db
 
 # Claude
 .claude/
+
+# Ghost assets (not TitanFlow code)
+backups/
+themes/
