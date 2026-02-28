@@ -7,7 +7,44 @@ import logging
 from typing import Any
 
 import httpx
-import ollama
+
+try:
+    import ollama  # type: ignore
+except Exception:  # pragma: no cover - optional dependency
+    ollama = None
+
+
+class _OllamaHTTPClient:
+    """Fallback Ollama client using HTTP API when python-ollama isn't available."""
+
+    def __init__(self, host: str) -> None:
+        self._client = httpx.AsyncClient(base_url=host, timeout=120.0)
+
+    async def generate(self, *, model: str, prompt: str, system: str = "", options: dict | None = None) -> dict:
+        payload = {
+            "model": model,
+            "prompt": prompt,
+            "system": system,
+            "options": options or {},
+            "stream": False,
+        }
+        response = await self._client.post("/api/generate", json=payload)
+        response.raise_for_status()
+        return response.json()
+
+    async def chat(self, *, model: str, messages: list[dict[str, str]], options: dict | None = None) -> dict:
+        payload = {
+            "model": model,
+            "messages": messages,
+            "options": options or {},
+            "stream": False,
+        }
+        response = await self._client.post("/api/chat", json=payload)
+        response.raise_for_status()
+        return response.json()
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
 
 from titanflow.config import LLMConfig
 
@@ -25,7 +62,10 @@ class LLMClient:
 
     def __init__(self, config: LLMConfig) -> None:
         self.config = config
-        self._ollama = ollama.AsyncClient(host=config.base_url)
+        if ollama is None:
+            self._ollama = _OllamaHTTPClient(config.base_url)
+        else:
+            self._ollama = ollama.AsyncClient(host=config.base_url)
         self._http = httpx.AsyncClient(timeout=120.0)
         self._sem = asyncio.Semaphore(1)  # serialize Ollama access
 
@@ -114,6 +154,11 @@ class LLMClient:
                 )
                 return await self._cloud_chat(messages, temperature=temperature)
             raise
+
+    async def close(self) -> None:
+        await self._http.aclose()
+        if hasattr(self._ollama, "aclose"):
+            await self._ollama.aclose()
 
     async def _ollama_generate(
         self,

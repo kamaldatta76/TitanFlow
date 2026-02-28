@@ -1,0 +1,39 @@
+[Unit]
+Description=TitanFlow Core (Microkernel)
+After=network-online.target ollama.service
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=titanflow
+Group=titanflow
+RuntimeDirectory=titanflow
+RuntimeDirectoryMode=0750
+
+ExecStart=/opt/titanflow/.venv/bin/python -m titanflow.core.kernel
+WorkingDirectory=/opt/titanflow
+
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/data/titanflow /run/titanflow
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+MemoryMax=1G
+CPUWeight=100
+
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+Environment=TITANFLOW_CORE_CONFIG=/etc/titanflow/titanflow-core.yaml
+EnvironmentFile=-/etc/titanflow/secrets/core.env
+
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

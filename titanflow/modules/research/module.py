@@ -1,21 +1,25 @@
-"""TitanFlow Research Module — autonomous feed tracking and analysis."""
+"""TitanFlow v0.2 Research Module — IPC-based."""
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
+import os
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
-import feedparser
-import httpx
-from sqlmodel import select
+try:
+    import feedparser  # type: ignore
+except Exception:  # pragma: no cover - optional dependency for runtime
+    feedparser = None
+import json
+import yaml
 
-from titanflow.models import FeedItem, FeedSource, GitHubRelease
-from titanflow.core.http import request_with_retry
-from titanflow.modules.base import BaseModule
+from titanflow.modules.base_ipc import ModuleBaseIPC
 
-logger = logging.getLogger("titanflow.research")
+logger = logging.getLogger("titanflow.research.ipc")
 
 RESEARCH_SYSTEM_PROMPT = """You are TitanFlow's research analyst. Your job is to evaluate and summarize
 technical news about LLMs, AI infrastructure, and developer tools.
@@ -34,296 +38,211 @@ SUMMARY: <your summary>
 RELEVANCE: <score>"""
 
 
-class ResearchModule(BaseModule):
-    """Tracks RSS feeds and GitHub releases, generates LLM summaries."""
+class ResearchModule(ModuleBaseIPC):
+    def __init__(self) -> None:
+        super().__init__()
+        self.fetch_interval = int(os.environ.get("RESEARCH_FETCH_INTERVAL", "7200"))
+        self.processing_batch_size = int(os.environ.get("RESEARCH_BATCH_SIZE", "50"))
+        self.config_dir = Path(os.environ.get("TITANFLOW_CONFIG_DIR", "/opt/titanflow/config"))
 
-    name = "research"
-    description = "Autonomous research tracking — feeds, GitHub, LLM analysis"
+    async def run(self) -> None:
+        logger.info("Research module started (IPC)")
+        asyncio.create_task(self._loop_fetch())
+        asyncio.create_task(self._loop_process())
+        await asyncio.Event().wait()
 
-    def __init__(self, engine) -> None:
-        super().__init__(engine)
-        self._http = httpx.AsyncClient(
-            timeout=30.0,
-            follow_redirects=True,
-            headers={"User-Agent": "TitanFlow/0.1 Research Bot"},
-        )
-        self._research_config = self.config.modules.research
+    async def _loop_fetch(self) -> None:
+        while True:
+            try:
+                await self.fetch_all_feeds()
+                await self.fetch_github_releases()
+            except Exception as e:
+                logger.warning("Fetch loop error: %s", e)
+            await asyncio.sleep(self.fetch_interval)
 
-    async def start(self) -> None:
-        """Register feeds from config and schedule fetching."""
-        # Schedule periodic feed fetching
-        interval = self._research_config.fetch_interval
-        self.scheduler.add_interval(
-            job_id="research.fetch_feeds",
-            func=self.fetch_all_feeds,
-            seconds=interval,
-        )
-        self.scheduler.add_interval(
-            job_id="research.fetch_github",
-            func=self.fetch_github_releases,
-            seconds=interval,
-        )
-        self.scheduler.add_interval(
-            job_id="research.process_items",
-            func=self.process_unprocessed,
-            seconds=600,  # every 10 minutes
-        )
-
-        self.log.info(f"Research module started — fetch interval: {interval}s")
-
-        await self._check_feed_health()
-
-        # Do an initial fetch on startup
-        await self.fetch_all_feeds()
-        await self.fetch_github_releases()
-
-    async def stop(self) -> None:
-        await self._http.aclose()
-        self.scheduler.remove_job("research.fetch_feeds")
-        self.scheduler.remove_job("research.fetch_github")
-        self.scheduler.remove_job("research.process_items")
-
-    async def handle_telegram(self, command: str, args: str, context: Any) -> str | None:
-        if command == "research":
-            return await self._cmd_research_status()
-        elif command == "latest":
-            return await self._cmd_latest(args)
-        return None
-
-    # ─── Feed Fetching ────────────────────────────────────
+    async def _loop_process(self) -> None:
+        while True:
+            try:
+                await self.process_unprocessed()
+            except Exception as e:
+                logger.warning("Process loop error: %s", e)
+            await asyncio.sleep(600)
 
     async def fetch_all_feeds(self) -> None:
-        """Fetch all registered RSS/Atom feeds."""
-        self.log.info("Fetching all feeds...")
-        async with self.db.session() as session:
-            result = await session.exec(
-                select(FeedSource).where(FeedSource.enabled == True)
-            )
-            sources = result.all()
-
+        sources = await self._get_feed_sources()
         if not sources:
-            self.log.info("No feed sources registered — loading from config")
             await self._load_feeds_from_config()
-            async with self.db.session() as session:
-                result = await session.exec(
-                    select(FeedSource).where(FeedSource.enabled == True)
-                )
-                sources = result.all()
+            sources = await self._get_feed_sources()
 
         new_items = 0
         for source in sources:
-            count = await self._fetch_feed(source)
-            new_items += count
+            new_items += await self._fetch_feed(source)
 
-        self.log.info(f"Feed fetch complete — {new_items} new item(s) from {len(sources)} feed(s)")
+        logger.info("Feed fetch complete — %d new items", new_items)
 
-        if new_items > 0:
-            await self.events.emit(
-                "research.new_items",
-                data={"count": new_items},
-                source="research",
-            )
+    async def _get_feed_sources(self) -> list[dict[str, Any]]:
+        rows = await self.db_query(
+            "feed_sources",
+            "SELECT id, url, name, category FROM feed_sources WHERE enabled = 1",
+        )
+        return rows
 
-    async def _fetch_feed(self, source: FeedSource) -> int:
-        """Fetch a single feed and store new items. Returns count of new items."""
+    async def _load_feeds_from_config(self) -> None:
+        feeds_path = self.config_dir / "feeds.yaml"
+        if not feeds_path.exists():
+            logger.warning("No feeds config at %s", feeds_path)
+            return
+
+        data = yaml.safe_load(feeds_path.read_text()) or {}
+        for section_name, feeds in data.get("feeds", {}).items():
+            for feed_def in feeds:
+                url = feed_def["url"]
+                existing = await self.db_query(
+                    "feed_sources",
+                    "SELECT id FROM feed_sources WHERE url = ?",
+                    [url],
+                )
+                if existing:
+                    continue
+                await self.db_insert(
+                    "feed_sources",
+                    {
+                        "url": url,
+                        "name": feed_def.get("name", section_name),
+                        "category": feed_def.get("category", "general"),
+                        "enabled": 1,
+                        "created_at": datetime.now(timezone.utc).isoformat(),
+                    },
+                )
+
+    async def _fetch_feed(self, source: dict[str, Any]) -> int:
+        if feedparser is None:
+            logger.warning("feedparser not installed; skipping feed %s", source.get("url"))
+            return 0
         try:
-            response = await request_with_retry(self._http, "GET", source.url)
-            feed = feedparser.parse(response.text)
+            response = await self.http_request(source["url"], "GET")
+            feed = feedparser.parse(response.get("body", ""))
         except Exception as e:
-            self.log.warning(f"Failed to fetch feed {source.url}: {e}")
+            logger.warning("Failed to fetch feed %s: %s", source["url"], e)
             return 0
 
         new_count = 0
-        async with self.db.session() as session:
-            for entry in feed.entries[: self._research_config.max_items_per_feed]:
-                guid = entry.get("id") or entry.get("link") or hashlib.md5(
-                    entry.get("title", "").encode()
-                ).hexdigest()
+        for entry in feed.entries[:50]:
+            guid = entry.get("id") or entry.get("link") or hashlib.md5(
+                entry.get("title", "").encode()
+            ).hexdigest()
+            existing = await self.db_query(
+                "feed_items",
+                "SELECT id FROM feed_items WHERE guid = ?",
+                [guid],
+            )
+            if existing:
+                continue
 
-                # Check for duplicates
-                existing = await session.exec(
-                    select(FeedItem).where(FeedItem.guid == guid)
-                )
-                if existing.first():
-                    continue
+            published = None
+            if hasattr(entry, "published_parsed") and entry.published_parsed:
+                published = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
 
-                published = None
-                if hasattr(entry, "published_parsed") and entry.published_parsed:
-                    published = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
+            await self.db_insert(
+                "feed_items",
+                {
+                    "feed_source_id": source["id"],
+                    "guid": guid,
+                    "title": entry.get("title", "Untitled"),
+                    "url": entry.get("link", ""),
+                    "author": entry.get("author", ""),
+                    "content": entry.get("summary", entry.get("description", "")),
+                    "category": source.get("category", "general"),
+                    "published_at": published.isoformat() if published else None,
+                    "fetched_at": datetime.now(timezone.utc).isoformat(),
+                    "is_processed": 0,
+                    "is_published": 0,
+                    "relevance_score": 0.0,
+                },
+            )
+            new_count += 1
 
-                item = FeedItem(
-                    feed_source_id=source.id,
-                    guid=guid,
-                    title=entry.get("title", "Untitled"),
-                    url=entry.get("link", ""),
-                    author=entry.get("author", ""),
-                    content=entry.get("summary", entry.get("description", "")),
-                    category=source.category,
-                    published_at=published,
-                )
-                session.add(item)
-                new_count += 1
-
-            # Update last_fetched
-            source.last_fetched = datetime.now(timezone.utc)
-            session.add(source)
-            await session.commit()
+        await self.db_update(
+            "feed_sources",
+            {"last_fetched": datetime.now(timezone.utc).isoformat()},
+            "id = ?",
+            [source["id"]],
+        )
 
         return new_count
 
-    async def _load_feeds_from_config(self) -> None:
-        """Load feed sources from the feeds.yaml config file."""
-        import yaml
-        from pathlib import Path
-
-        feeds_path = Path(self.config.config_dir) / "feeds.yaml"
-        if not feeds_path.exists():
-            self.log.warning(f"No feeds config at {feeds_path}")
-            return
-
-        with open(feeds_path) as f:
-            data = yaml.safe_load(f) or {}
-
-        async with self.db.session() as session:
-            for section_name, feeds in data.get("feeds", {}).items():
-                for feed_def in feeds:
-                    url = feed_def["url"]
-                    existing = await session.exec(
-                        select(FeedSource).where(FeedSource.url == url)
-                    )
-                    if existing.first():
-                        continue
-
-                    source = FeedSource(
-                        url=url,
-                        name=feed_def.get("name", section_name),
-                        category=feed_def.get("category", "general"),
-                    )
-                    session.add(source)
-
-            await session.commit()
-
-        self.log.info("Loaded feed sources from config")
-
-    async def _check_feed_health(self) -> None:
-        """Check feed URLs on startup and log failures."""
-        import yaml
-        from pathlib import Path
-
-        feeds_path = Path(self.config.config_dir) / "feeds.yaml"
-        if not feeds_path.exists():
-            self.log.warning(f"No feeds config at {feeds_path}")
-            return
-
-        with open(feeds_path) as f:
-            data = yaml.safe_load(f) or {}
-
-        feed_urls: list[str] = []
-        for feeds in data.get("feeds", {}).values():
-            for feed_def in feeds:
-                url = feed_def.get("url")
-                if url:
-                    feed_urls.append(url)
-
-        if not feed_urls:
-            self.log.warning("Feed health check skipped — no feeds found")
-            return
-
-        failures = 0
-        for url in feed_urls:
-            ok = False
-            try:
-                await request_with_retry(self._http, "HEAD", url, attempts=2, timeout=10.0)
-                ok = True
-            except Exception:
-                try:
-                    await request_with_retry(self._http, "GET", url, attempts=2, timeout=10.0)
-                    ok = True
-                except Exception as e:
-                    self.log.warning(f"Feed health check failed for {url}: {e}")
-
-            if not ok:
-                failures += 1
-
-        if failures == 0:
-            self.log.info(f"Feed health check OK ({len(feed_urls)} feed(s))")
-
-    # ─── GitHub Release Tracking ──────────────────────────
-
     async def fetch_github_releases(self) -> None:
-        """Fetch latest releases from tracked GitHub repos."""
-        import yaml
-        from pathlib import Path
-
-        repos_path = Path(self.config.config_dir) / "github_repos.yaml"
+        repos_path = self.config_dir / "github_repos.yaml"
         if not repos_path.exists():
-            self.log.debug("No github_repos.yaml config found")
             return
 
-        with open(repos_path) as f:
-            data = yaml.safe_load(f) or {}
-
-        github_token = self.config.integrations.github.token
-        headers = {"Accept": "application/vnd.github.v3+json"}
-        if github_token:
-            headers["Authorization"] = f"Bearer {github_token}"
-
-        new_releases = 0
+        data = yaml.safe_load(repos_path.read_text()) or {}
         for repo_def in data.get("tracked_repos", []):
             repo = repo_def["repo"]
+            url = f"https://api.github.com/repos/{repo}/releases"
             try:
-                response = await request_with_retry(
-                    self._http,
-                    "GET",
-                    f"https://api.github.com/repos/{repo}/releases",
-                    headers=headers,
-                    params={"per_page": 5},
-                )
-                releases = response.json()
+                response = await self.http_request(url, "GET", headers={"Accept": "application/vnd.github.v3+json"})
+                releases = json.loads(response.get("body", "[]"))
             except Exception as e:
-                self.log.warning(f"Failed to fetch releases for {repo}: {e}")
+                logger.warning("Failed to fetch releases for %s: %s", repo, e)
                 continue
 
-            async with self.db.session() as session:
-                for rel in releases:
-                    guid = f"{repo}:{rel['tag_name']}"
-                    existing = await session.exec(
-                        select(GitHubRelease).where(GitHubRelease.guid == guid)
-                    )
-                    if existing.first():
-                        continue
+            for rel in releases[:5]:
+                guid = f"{repo}:{rel.get('tag_name')}"
+                existing = await self.db_query(
+                    "github_releases",
+                    "SELECT id FROM github_releases WHERE guid = ?",
+                    [guid],
+                )
+                if existing:
+                    continue
 
-                    published = None
-                    if rel.get("published_at"):
-                        published = datetime.fromisoformat(
-                            rel["published_at"].replace("Z", "+00:00")
-                        )
+                published = rel.get("published_at")
+                await self.db_insert(
+                    "github_releases",
+                    {
+                        "repo": repo,
+                        "tag": rel.get("tag_name"),
+                        "name": rel.get("name") or rel.get("tag_name"),
+                        "body": (rel.get("body") or "")[:5000],
+                        "url": rel.get("html_url", ""),
+                        "published_at": published,
+                        "fetched_at": datetime.now(timezone.utc).isoformat(),
+                        "is_processed": 0,
+                        "is_published": 0,
+                        "guid": guid,
+                    },
+                )
 
-                    release = GitHubRelease(
-                        repo=repo,
-                        tag=rel["tag_name"],
-                        name=rel.get("name", rel["tag_name"]),
-                        body=rel.get("body", "")[:5000],  # truncate very long release notes
-                        url=rel.get("html_url", ""),
-                        published_at=published,
-                        guid=guid,
-                    )
-                    session.add(release)
-                    new_releases += 1
+    async def process_unprocessed(self) -> None:
+        items = await self.db_query(
+            "feed_items",
+            "SELECT id, title, category, content FROM feed_items WHERE is_processed = 0 ORDER BY fetched_at DESC LIMIT ?",
+            [self.processing_batch_size],
+        )
+        if not items:
+            return
 
-                await session.commit()
-
-        if new_releases:
-            self.log.info(f"Found {new_releases} new GitHub release(s)")
-            await self.events.emit(
-                "research.new_releases",
-                data={"count": new_releases},
-                source="research",
-            )
+        for item in items:
+            prompt = f"""Evaluate this feed item:\n\nTitle: {item['title']}\nCategory: {item['category']}\nContent: {item['content'][:2000]}\n\n{RESEARCH_SYSTEM_PROMPT}"""
+            try:
+                response = await self.llm_generate(prompt, max_tokens=500)
+                summary, relevance = self._parse_llm_response(response)
+                await self.db_update(
+                    "feed_items",
+                    {
+                        "summary": summary,
+                        "relevance_score": relevance,
+                        "is_processed": 1,
+                    },
+                    "id = ?",
+                    [item["id"]],
+                )
+            except Exception as e:
+                logger.warning("Failed to process item %s: %s", item.get("title"), e)
 
     @staticmethod
     def _parse_llm_response(text: str) -> tuple[str, float]:
-        """Parse LLM response into summary + relevance score."""
         summary = ""
         relevance = 0.5
         for line in text.strip().split("\n"):
@@ -336,96 +255,8 @@ class ResearchModule(BaseModule):
                     relevance = 0.5
         return summary, relevance
 
-    # ─── LLM Processing ──────────────────────────────────
 
-    async def process_unprocessed(self) -> None:
-        """Process unprocessed feed items through LLM for summarization."""
-        async with self.db.session() as session:
-            result = await session.exec(
-                select(FeedItem)
-                .where(FeedItem.is_processed == False)
-                .order_by(FeedItem.fetched_at.desc())
-                .limit(self.config.modules.research.processing_batch_size)
-            )
-            items = result.all()
-
-        if not items:
-            return
-
-        self.log.info(f"Processing {len(items)} unprocessed feed item(s)...")
-
-        for item in items:
-            try:
-                prompt = f"""Evaluate this feed item:
-
-Title: {item.title}
-Category: {item.category}
-Content: {item.content[:2000]}
-
-{RESEARCH_SYSTEM_PROMPT}"""
-
-                response = await self.llm.generate(
-                    prompt,
-                    temperature=0.3,
-                    max_tokens=500,
-                )
-
-                summary, relevance = self._parse_llm_response(response)
-
-                async with self.db.session() as session:
-                    item.summary = summary
-                    item.relevance_score = relevance
-                    item.is_processed = True
-                    session.add(item)
-                    await session.commit()
-
-            except Exception as e:
-                self.log.warning(f"Failed to process item '{item.title}': {e}")
-
-        self.log.info(f"Processed {len(items)} item(s)")
-
-    # ─── Telegram Commands ────────────────────────────────
-
-    async def _cmd_research_status(self) -> str:
-        async with self.db.session() as session:
-            feeds = (await session.exec(select(FeedSource))).all()
-            items = (await session.exec(
-                select(FeedItem).where(FeedItem.is_processed == True)
-            )).all()
-            unprocessed = (await session.exec(
-                select(FeedItem).where(FeedItem.is_processed == False)
-            )).all()
-
-        lines = [
-            "📊 Research Module Status",
-            f"  Feeds: {len(feeds)}",
-            f"  Processed items: {len(items)}",
-            f"  Pending: {len(unprocessed)}",
-        ]
-        return "\n".join(lines)
-
-    async def _cmd_latest(self, args: str) -> str:
-        """Get latest high-relevance items."""
-        limit = 5
-        async with self.db.session() as session:
-            result = await session.exec(
-                select(FeedItem)
-                .where(FeedItem.is_processed == True)
-                .where(FeedItem.relevance_score >= 0.6)
-                .order_by(FeedItem.fetched_at.desc())
-                .limit(limit)
-            )
-            items = result.all()
-
-        if not items:
-            return "No high-relevance items found yet. Research engine is still gathering data."
-
-        lines = ["📰 Latest Research Items\n"]
-        for item in items:
-            score = f"[{item.relevance_score:.1f}]"
-            lines.append(f"• {score} {item.title}")
-            if item.summary:
-                lines.append(f"  {item.summary[:150]}")
-            lines.append("")
-
-        return "\n".join(lines)
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    module = ResearchModule()
+    asyncio.run(module.start())

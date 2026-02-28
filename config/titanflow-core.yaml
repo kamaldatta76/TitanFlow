@@ -1,0 +1,40 @@
+core:
+  instance_name: "flow"
+  socket_path: /run/titanflow/core.sock
+  pid_file: /run/titanflow/core.pid
+
+telegram:
+  bot_token: "${TELEGRAM_BOT_TOKEN}"
+  allowed_users: "${TELEGRAM_ALLOWED_USERS}"
+  typing_indicator: true
+
+llm:
+  default_model: "flow:24b"
+  fallback_model: "qwen3:14b"
+  cloud_provider: "anthropic"
+  cloud_api_key: "${ANTHROPIC_API_KEY}"
+  cloud_model: "claude-sonnet-4-5-20250929"
+  semaphore_limit: 1
+  priority_levels:
+    chat: 0
+    module: 1
+    research: 2
+  timeout_seconds: 120
+
+database:
+  path: /data/titanflow/titanflow.db
+  wal_mode: true
+
+http_proxy:
+  max_requests_per_minute: 60
+  timeout_seconds: 30
+
+audit:
+  enabled: true
+  retention_days: 90
+
+modules:
+  manifest_dir: /etc/titanflow/manifests
+  health_check_interval: 60
+  restart_max_attempts: 3
+  restart_backoff_seconds: 10

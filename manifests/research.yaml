@@ -1,0 +1,60 @@
+module:
+  id: "research"
+  name: "Research Module"
+  version: "0.2.0"
+  description: "RSS/GitHub ingestion and summarization"
+  service: "titanflow-mod@research.service"
+  socket: /run/titanflow-mod-research/research.sock
+  token_file: /etc/titanflow/secrets/research.token
+
+permissions:
+  llm:
+    enabled: true
+    priority: "research"
+    max_concurrent: 1
+    max_queue_depth: 10
+    models:
+      - "flow:24b"
+      - "qwen3:14b"
+    max_tokens_per_request: 2048
+    max_requests_per_minute: 30
+
+  database:
+    enabled: true
+    tables:
+      - name: "feed_items"
+        access: "readwrite"
+      - name: "feed_sources"
+        access: "readwrite"
+      - name: "github_releases"
+        access: "readwrite"
+    max_rows_per_query: 1000
+
+  telegram:
+    enabled: false
+
+  http_outbound:
+    enabled: true
+    allowed_domains:
+      - "api.github.com"
+      - "github.com"
+      - "huggingface.co"
+      - "openai.com"
+      - "ollama.com"
+      - "arxiv.org"
+      - "engineering.fb.com"
+      - "blog.google"
+      - "*.github.com"
+      - "*.arxiv.org"
+      - "*.openai.com"
+      - "*.huggingface.co"
+    max_requests_per_minute: 60
+
+  filesystem:
+    enabled: true
+    paths:
+      - path: /data/titanflow/research
+        access: "readwrite"
+
+  network_listen:
+    enabled: false
