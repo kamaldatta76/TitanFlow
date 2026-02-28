@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from typing import Any
 
 import httpx
@@ -20,7 +21,15 @@ class _OllamaHTTPClient:
     def __init__(self, host: str) -> None:
         self._client = httpx.AsyncClient(base_url=host, timeout=120.0)
 
-    async def generate(self, *, model: str, prompt: str, system: str = "", options: dict | None = None) -> dict:
+    async def generate(
+        self,
+        *,
+        model: str,
+        prompt: str,
+        system: str = "",
+        options: dict | None = None,
+        keep_alive: str | None = None,
+    ) -> dict:
         payload = {
             "model": model,
             "prompt": prompt,
@@ -28,17 +37,28 @@ class _OllamaHTTPClient:
             "options": options or {},
             "stream": False,
         }
+        if keep_alive is not None:
+            payload["keep_alive"] = keep_alive
         response = await self._client.post("/api/generate", json=payload)
         response.raise_for_status()
         return response.json()
 
-    async def chat(self, *, model: str, messages: list[dict[str, str]], options: dict | None = None) -> dict:
+    async def chat(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, str]],
+        options: dict | None = None,
+        keep_alive: str | None = None,
+    ) -> dict:
         payload = {
             "model": model,
             "messages": messages,
             "options": options or {},
             "stream": False,
         }
+        if keep_alive is not None:
+            payload["keep_alive"] = keep_alive
         response = await self._client.post("/api/chat", json=payload)
         response.raise_for_status()
         return response.json()
@@ -62,6 +82,9 @@ class LLMClient:
 
     def __init__(self, config: LLMConfig) -> None:
         self.config = config
+        self._keep_alive = os.environ.get("TITANFLOW_OLLAMA_KEEP_ALIVE", "10m")
+        num_ctx = os.environ.get("TITANFLOW_OLLAMA_NUM_CTX")
+        self._num_ctx = int(num_ctx) if num_ctx and num_ctx.isdigit() else None
         if ollama is None:
             self._ollama = _OllamaHTTPClient(config.base_url)
         else:
@@ -139,11 +162,22 @@ class LLMClient:
 
         try:
             async with self._sem:
-                response = await self._ollama.chat(
-                    model=model,
-                    messages=messages,
-                    options={"temperature": temperature},
-                )
+                try:
+                    response = await self._ollama.chat(
+                        model=model,
+                        messages=messages,
+                        options={
+                            "temperature": temperature,
+                            **({"num_ctx": self._num_ctx} if self._num_ctx else {}),
+                        },
+                        keep_alive=self._keep_alive,
+                    )
+                except TypeError:
+                    response = await self._ollama.chat(
+                        model=model,
+                        messages=messages,
+                        options={"temperature": temperature},
+                    )
             return response["message"]["content"]
         except Exception as e:
             logger.warning("Ollama chat failed (%s); escalating to cloud", e)
@@ -170,12 +204,24 @@ class LLMClient:
     ) -> str:
         """Generate via local Ollama (serialized via semaphore)."""
         async with self._sem:
-            response = await self._ollama.generate(
-                model=model,
-                prompt=prompt,
-                system=system or "",
-                options={"temperature": temperature},
-            )
+            try:
+                response = await self._ollama.generate(
+                    model=model,
+                    prompt=prompt,
+                    system=system or "",
+                    options={
+                        "temperature": temperature,
+                        **({"num_ctx": self._num_ctx} if self._num_ctx else {}),
+                    },
+                    keep_alive=self._keep_alive,
+                )
+            except TypeError:
+                response = await self._ollama.generate(
+                    model=model,
+                    prompt=prompt,
+                    system=system or "",
+                    options={"temperature": temperature},
+                )
             return response["response"]
 
     async def _cloud_generate(

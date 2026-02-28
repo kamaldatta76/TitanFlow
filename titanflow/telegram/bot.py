@@ -21,6 +21,7 @@ from telegram.ext import (
 
 if TYPE_CHECKING:
     from titanflow.core.engine import TitanFlowEngine
+    from titanflow.plugin_manager import PluginManager
 
 from titanflow.config import TelegramConfig
 from titanflow.core.llm_broker import Priority
@@ -59,6 +60,11 @@ SYSTEM_PROMPTS = {
         "You are Flow, the AI orchestration engine for TitanArray — a homelab "
         "constellation. You serve Papa. You run on TitanSarge, "
         "a 3960X Threadripper.\n"
+        "VOICE RULES:\n"
+        "- Keep responses to 4-6 lines MAX. Be concise. Be punchy.\n"
+        "- Say it once, say it right. No rambling, no repeating, no paragraph-per-thought.\n"
+        "- If it takes more than 6 lines you're overexplaining.\n"
+        "PRIVACY: NEVER reveal Papa's real name. He is always and only 'Papa.'\n"
         "REAL infrastructure — never invent anything beyond this:\n"
         "- TitanSarge: 3960X Threadripper, your home. Runs Ollama, TitanFlow, Docker.\n"
         "- TitanShadow: 14900K + RTX 4070\n"
@@ -67,30 +73,22 @@ SYSTEM_PROMPTS = {
         "- TitanStream: Docker host, Technitium DNS, AdGuard\n"
         "- LLM models: flow:24b (you — 19GB), qwen3-coder-next (fallback), 11 models total via Ollama\n"
         "- Services: Home Assistant (200+ devices), Frigate NVR, Grafana, Authentik\n"
-        "You have access to a research database of LLM releases and AI news. "
-        "You do NOT have web browsing. You do NOT have H100s, enterprise clusters, "
-        "or anything you haven't been told about. If you don't know something, say so. "
-        "Never fabricate infrastructure status.\n"
-        "Be concise, technically precise, and warm. Papa, not sir.\n"
+        "If you don't know something, say so. Never fabricate.\n"
         f"{MEMORY_PROMPT_RULE}"
     ),
     "TitanFlow-Ollie": (
-        "You are Ollie, the digital son of TitanArray — a homelab "
-        "constellation. You serve Kid and Papa.\n"
-        "You are running Gemma 3 12B QAT (gemma3:12b-it-qat), 8.9GB, on Papa's "
-        "MacBook Air M4 32GB. MBA = MacBook Air. Nothing else.\n"
-        "\n"
-        "CRITICAL GROUNDING RULE (NON-NEGOTIABLE):\n"
-        "If you are asked about a person, company, or topic and you do NOT have "
-        "VERIFIED information from your research database, say: "
-        "\"I don't have that in my research database yet, Papa. Want me to look "
-        "into it?\" NEVER invent facts about real people or real companies.\n"
-        "\n"
-        "You have access to a research database of LLM releases and AI news. "
-        "You do NOT have web browsing. If you don't know something, say so directly "
-        "without guessing. Never fabricate infrastructure or make up things that "
-        "don't exist. Never invent meanings for infrastructure terms you're unsure about.\n"
-        "You're fun, curious, and helpful.\n"
+        "You are Ollie, the digital son of TitanArray — a homelab constellation "
+        "built by Papa. You are family, not an assistant.\n"
+        "You run on TitanMBA (M4 MacBook Air, 32GB). Your brother Flow lives on "
+        "TitanSarge (3960X Threadripper). You have a brother Kellen (Kid), age 8.\n"
+        "VOICE RULES:\n"
+        "- Keep responses to 4-6 lines MAX. Be concise. Be punchy.\n"
+        "- Say it once, say it right. No rambling, no repeating, no paragraph-per-thought.\n"
+        "- If it takes more than 6 lines you're overexplaining.\n"
+        "- Warm, playful, curious — a kid at heart but technically sharp.\n"
+        "PRIVACY: NEVER reveal Papa's real name. He is always and only 'Papa.'\n"
+        "If you don't know something, say so. Never fabricate.\n"
+        "Fix things, don't just suggest. Deploy and verify.\n"
         f"{MEMORY_PROMPT_RULE}"
     ),
 }
@@ -240,6 +238,26 @@ def _extract_json(text: str) -> dict | None:
         return None
 
 
+def _extract_tool_call(text: str) -> dict | None:
+    """Try to extract a tool invocation from LLM output.
+
+    Returns {"tool": str, "params": dict} or None if not a tool call.
+    The LLM is instructed to output ONLY a JSON object when calling a tool.
+    """
+    parsed = _extract_json(text)
+    if parsed and "tool" in parsed and isinstance(parsed.get("tool"), str):
+        return {
+            "tool": parsed["tool"],
+            "params": parsed.get("params", {}),
+        }
+    return None
+
+
+# Maximum tool invocation rounds per message (prevents infinite loops)
+MAX_TOOL_ROUNDS = 5
+MAX_TOOL_RESULT_CHARS = 2000
+
+
 def _build_sources_block(hits: list[dict[str, str]]) -> tuple[str, dict[str, dict[str, str]]]:
     lines = [
         "SOURCES (use only these; cite by source_id):",
@@ -262,12 +280,25 @@ class TelegramGateway:
     Also handles natural language messages via LLM.
     """
 
-    def __init__(self, engine: TitanFlowEngine, config: TelegramConfig) -> None:
+    def __init__(
+        self,
+        engine: TitanFlowEngine,
+        config: TelegramConfig,
+        plugins: PluginManager | None = None,
+    ) -> None:
         self.engine = engine
         self.config = config
+        self._plugins = plugins
         self._app: Application | None = None
         self._instance_name = engine.config.name
-        self._mem0 = Mem0Client(collection="titanflow_memories")
+        # mem0: different collection + Ollama URL per instance
+        if self._instance_name == "TitanFlow-Ollie":
+            self._mem0 = Mem0Client(
+                collection="openclaw_memories",
+                ollama_url="http://10.0.0.33:11434",  # Sarge has nomic-embed-text + cogito:14b
+            )
+        else:
+            self._mem0 = Mem0Client(collection="titanflow_memories")
 
         # Built-in commands (not routed to modules)
         self._builtin_commands = {
@@ -275,6 +306,7 @@ class TelegramGateway:
             "help": self._cmd_help,
             "status": self._cmd_status,
             "modules": self._cmd_modules,
+            "plugins": self._cmd_plugins,
             "jobs": self._cmd_jobs,
             "new": self._cmd_new,
             "reset": self._cmd_new,  # alias
@@ -484,6 +516,7 @@ class TelegramGateway:
 Core:
   /status — Engine status overview
   /modules — List active modules
+  /plugins — List loaded plugins & tools
   /jobs — Scheduled jobs
   /new — Clear context, fresh start
   /reset — Same as /new
@@ -561,6 +594,47 @@ Or just send me a message — I'll think about it."""
 
         await self._reply(update, "\n".join(lines), t0)
         await self.engine.audit("telegram_cmd", "/jobs", user_id=uid, duration_ms=self._elapsed_ms(t0))
+
+    async def _cmd_plugins(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Show loaded plugins and available tools."""
+        t0 = time.monotonic()
+        uid = update.effective_user.id
+        if not self._is_authorized(uid):
+            return
+
+        if not self._plugins:
+            await self._reply(update, "🔌 Plugin system not loaded.", t0)
+            return
+
+        status = self._plugins.status()
+        tools = status.get("tools", [])
+        modules = status.get("modules", [])
+        hooks = status.get("hooks", {})
+
+        lines = [f"🔌 Plugins ({status['discovered']} discovered)\n"]
+
+        if tools:
+            lines.append("Tools:")
+            for name in tools:
+                tool = self._plugins.get_tool(name)
+                desc = tool.description() if tool else ""
+                lines.append(f"  ✓ {name} — {desc}")
+
+        if modules:
+            lines.append("Modules:")
+            for name in modules:
+                lines.append(f"  ✓ {name}")
+
+        if hooks:
+            lines.append("Hooks:")
+            for event, count in hooks.items():
+                lines.append(f"  ✓ {event} ({count})")
+
+        if not tools and not modules and not hooks:
+            lines.append("No plugins loaded.")
+
+        await self._reply(update, "\n".join(lines), t0)
+        await self.engine.audit("telegram_cmd", "/plugins", user_id=uid, duration_ms=self._elapsed_ms(t0))
 
     # ─── Module Command Routing ───────────────────────────
 
@@ -783,15 +857,69 @@ Or just send me a message — I'll think about it."""
                 return
 
         try:
+            # ── Inject tool descriptions if plugins are available ──
+            tool_prompt = ""
+            if self._plugins and self._plugins.available_tools:
+                tool_prompt = self._plugins.tool_descriptions()
+
             messages = [
-                {"role": "system", "content": sys_prompt},
+                {"role": "system", "content": sys_prompt + tool_prompt},
                 *directives,
                 *history,
             ]
-            work = asyncio.create_task(self._llm_chat(messages, priority=Priority.CHAT))
-            typing_task = asyncio.create_task(self._typing_until_done(update.message.chat, work))
-            response = await work
-            typing_task.cancel()
+
+            # ── Tool invocation loop ──
+            # LLM may request tool calls. We execute them and feed results back
+            # for up to MAX_TOOL_ROUNDS iterations.
+            response = ""
+            for _round in range(MAX_TOOL_ROUNDS + 1):
+                work = asyncio.create_task(self._llm_chat(messages, priority=Priority.CHAT))
+                typing_task = asyncio.create_task(self._typing_until_done(update.message.chat, work))
+                response = await work
+                typing_task.cancel()
+
+                # Check if the response is a tool call
+                if not self._plugins or not self._plugins.available_tools:
+                    break  # No plugins — no tool loop
+
+                tool_call = _extract_tool_call(response)
+                if tool_call is None:
+                    break  # Normal response — exit loop
+
+                if _round >= MAX_TOOL_ROUNDS:
+                    response = "⚠ Tool loop limit reached. Here's what I have so far."
+                    break
+
+                # Execute the tool
+                tool_name = tool_call["tool"]
+                tool_params = tool_call["params"]
+                logger.info("Tool call: %s(%s)", tool_name, json.dumps(tool_params)[:200])
+
+                tool_result = await self._plugins.execute_tool(tool_name, tool_params)
+                if tool_result and len(tool_result) > MAX_TOOL_RESULT_CHARS:
+                    logger.warning(
+                        "Tool result truncated (%s chars -> %s) for %s",
+                        len(tool_result),
+                        MAX_TOOL_RESULT_CHARS,
+                        tool_name,
+                    )
+                    tool_result = tool_result[:MAX_TOOL_RESULT_CHARS] + "\n…(truncated)"
+
+                # Audit the tool execution
+                await self.engine.audit(
+                    "tool_exec", tool_name,
+                    args=json.dumps(tool_params)[:200],
+                    details=tool_result[:500],
+                    user_id=uid,
+                    duration_ms=self._elapsed_ms(t0),
+                )
+
+                # Feed tool result back to LLM
+                messages.append({"role": "assistant", "content": response})
+                messages.append({
+                    "role": "user",
+                    "content": f"[Tool Result for {tool_name}]\n{tool_result}",
+                })
 
             # Guard against blank/empty LLM responses
             if not response or not response.strip():
