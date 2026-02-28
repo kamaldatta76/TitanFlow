@@ -24,14 +24,16 @@ if TYPE_CHECKING:
 
 from titanflow.config import TelegramConfig
 from titanflow.core.llm_broker import Priority
+from titanflow.core.mem0_client import Mem0Client
 
 logger = logging.getLogger("titanflow.telegram")
 
 FOOTER_TPL = "\n\n─────────────────────\n_{icon} TF0.1 · {host} · {elapsed}_"
 
 MEMORY_PROMPT_RULE = (
-    "Never claim you are stateless. If asked about memory, describe TitanFlow Core’s memory system. "
-    "If Core provides no memory context, say: \"I don’t have prior chat history available in this session.\""
+    "You have conversation memory. Previous messages in this chat are replayed to you each turn. "
+    "You CAN reference earlier parts of the conversation. Never claim you are stateless or have no memory. "
+    "If asked about your memory, explain that TitanFlow Core maintains your chat history across messages."
 )
 
 GROUNDING_REFUSAL = (
@@ -265,6 +267,7 @@ class TelegramGateway:
         self.config = config
         self._app: Application | None = None
         self._instance_name = engine.config.name
+        self._mem0 = Mem0Client(collection="titanflow_memories")
 
         # Built-in commands (not routed to modules)
         self._builtin_commands = {
@@ -373,6 +376,15 @@ class TelegramGateway:
         except Exception:
             logger.debug("Failed to load pinned directives", exc_info=True)
             return []
+
+    async def _mem0_capture_safe(self, user_msg: str, assist_msg: str) -> None:
+        """Fire-and-forget: extract + store memorable facts."""
+        try:
+            n = await self._mem0.capture(user_msg, assist_msg)
+            if n:
+                logger.info("mem0: captured %d facts", n)
+        except Exception:
+            logger.debug("mem0 capture failed", exc_info=True)
 
     async def _search_knowledge_safe(self, text_query: str, limit: int = 6) -> list[dict]:
         if not hasattr(self.engine, "search_knowledge"):
@@ -618,7 +630,7 @@ Or just send me a message — I'll think about it."""
             response = (
                 self.engine.memory_status()
                 if hasattr(self.engine, "memory_status")
-                else "I don’t have prior chat history available in this session."
+                else "I maintain conversation history in TitanFlow Core. Previous messages are replayed each turn."
             )
             await self._reply(update, response, t0)
             await self._persist_message_safe(
@@ -662,6 +674,19 @@ Or just send me a message — I'll think about it."""
         history = await self._load_recent_messages_safe(chat_id)
         if not history or history[-1].get("content") != user_message:
             history = history + [{"role": "user", "content": user_message}]
+
+        # ── mem0: recall relevant long-term memories ──────────
+        try:
+            memories = await self._mem0.recall(user_message)
+            if memories:
+                mem_block = "\n".join(f"- {m}" for m in memories)
+                sys_prompt += (
+                    f"\n\n## Long-Term Memory\n{mem_block}\n"
+                    "Use these memories naturally. Do not list them unless asked."
+                )
+                logger.info("mem0: recalled %d memories", len(memories))
+        except Exception:
+            logger.debug("mem0 recall failed", exc_info=True)
 
         if _needs_grounding(user_message):
             hits = await self._search_knowledge_safe(user_message, limit=6)
@@ -738,6 +763,7 @@ Or just send me a message — I'll think about it."""
                     text=response,
                     token_est=_estimate_tokens(response),
                 )
+                asyncio.create_task(self._mem0_capture_safe(user_message, response))
                 return
             except Exception as e:
                 logger.error(f"LLM chat error: {e}")
@@ -767,6 +793,10 @@ Or just send me a message — I'll think about it."""
             response = await work
             typing_task.cancel()
 
+            # Guard against blank/empty LLM responses
+            if not response or not response.strip():
+                response = "I'm here, Papa — but my LLM returned an empty response. Try again or check Ollama."
+
             await self._reply(update, response, t0)
             await self._persist_message_safe(
                 chat_id=chat_id,
@@ -786,6 +816,8 @@ Or just send me a message — I'll think about it."""
                 "llm_chat", "chat", args=user_message[:200],
                 user_id=uid, duration_ms=self._elapsed_ms(t0),
             )
+            # ── mem0: capture facts from this exchange (fire-and-forget) ──
+            asyncio.create_task(self._mem0_capture_safe(user_message, response))
         except Exception as e:
             logger.error(f"LLM chat error: {e}")
             await self._reply(update, f"⚠ LLM inference error: {str(e)[:200]}", t0)
