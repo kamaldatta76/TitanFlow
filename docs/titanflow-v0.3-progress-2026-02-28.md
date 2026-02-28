@@ -146,3 +146,6 @@ This log captures all work completed so far for the TitanFlow v0.3 microkernel s
 **Sarge runtime fixes**
 - Rebuilt `/opt/titanflow/.venv` on Sarge with Linux Python 3.14 + pip install.
 - v0.3 core confirmed `active (running)` after service tweaks.
+
+**Telemetry access fix**
+- Core `RuntimeDirectoryMode` relaxed to `0755` so telemetry HTTP can connect to `/run/titanflow-core/telemetry.sock`.
