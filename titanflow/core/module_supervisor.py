@@ -16,6 +16,7 @@ class ModuleState:
     module_id: str
     last_seen: float
     connected: bool = True
+    alert_sent: bool = False
 
 
 class ModuleSupervisor:
@@ -26,7 +27,12 @@ class ModuleSupervisor:
         self._task: asyncio.Task | None = None
 
     def module_connected(self, module_id: str) -> None:
-        self._modules[module_id] = ModuleState(module_id=module_id, last_seen=time.time(), connected=True)
+        self._modules[module_id] = ModuleState(
+            module_id=module_id,
+            last_seen=time.time(),
+            connected=True,
+            alert_sent=False,
+        )
         logger.info("Module connected: %s", module_id)
 
     def module_heartbeat(self, module_id: str) -> None:
@@ -35,10 +41,13 @@ class ModuleSupervisor:
 
     async def module_disconnected(self, module_id: str) -> None:
         state = self._modules.get(module_id)
-        if state and not state.connected:
+        if state and not state.connected and state.alert_sent:
             return
         if state:
             state.connected = False
+            if state.alert_sent:
+                return
+            state.alert_sent = True
         logger.warning("Module disconnected: %s", module_id)
         await self._notify(f"⚠ TitanFlow module '{module_id}' disconnected.")
 
