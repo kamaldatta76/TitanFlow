@@ -85,6 +85,48 @@ class Article(SQLModel, table=True):
     published_at: Optional[datetime] = None
 
 
+# ─── Conversation / Memory Models ────────────────────────
+
+class Conversation(SQLModel, table=True):
+    """A chat thread (Telegram chat)."""
+
+    __tablename__ = "conversations"
+
+    chat_id: str = Field(primary_key=True)
+    user_id: Optional[int] = Field(default=None, index=True)
+    role: str = "user"
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    last_seen_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class Message(SQLModel, table=True):
+    """A single chat message."""
+
+    __tablename__ = "messages"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    chat_id: str = Field(index=True)
+    role: str
+    text: str
+    ts: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    token_est: int = 0
+    meta_json: str = "{}"
+
+
+class PinnedDirective(SQLModel, table=True):
+    """Pinned system directives injected into chat context."""
+
+    __tablename__ = "pinned_directives"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    scope: str = "global"  # global or chat
+    chat_id: str = ""
+    role: str = "system"
+    text: str
+    is_active: bool = True
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
 # ─── Security / General Models ────────────────────────────
 
 class SecurityEvent(SQLModel, table=True):

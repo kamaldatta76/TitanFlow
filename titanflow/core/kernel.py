@@ -123,6 +123,47 @@ class CoreEngine:
     async def audit(self, event_type: str, command: str = "", args: str = "", result: str = "success", details: str = "", user_id=None, duration_ms: int = 0) -> None:
         await self.audit_logger.log(event_type, module_id="core", method=command, status=result, details={"args": args, "details": details}, duration_ms=duration_ms)
 
+    async def audit_gate(self, *, user_id: int | None, gate: str, hits: int, decision: str, query: str) -> None:
+        await self.audit_logger.log(
+            "grounding_gate",
+            module_id="core",
+            method="telegram",
+            status=decision,
+            details={"gate": gate, "hits": hits, "decision": decision, "query": query[:200], "user_id": user_id},
+        )
+
+    async def upsert_conversation(self, chat_id: str, user_id: int | None, role: str) -> None:
+        await self.db.upsert_conversation(chat_id, user_id, role)
+
+    async def persist_message(
+        self,
+        *,
+        chat_id: str,
+        user_id: int | None,
+        role: str,
+        text: str,
+        token_est: int = 0,
+        meta_json: str = "{}",
+    ) -> None:
+        await self.db.upsert_conversation(chat_id, user_id, role)
+        await self.db.insert_message(chat_id, role, text, token_est=token_est, meta_json=meta_json)
+
+    async def load_recent_messages(self, chat_id: str, limit: int = 20) -> list[dict[str, str]]:
+        rows = await self.db.fetch_messages(chat_id, limit)
+        return [{"role": row["role"], "content": row["text"]} for row in rows]
+
+    async def load_pinned_directives(self, chat_id: str) -> list[dict[str, str]]:
+        rows = await self.db.fetch_pinned_directives(chat_id)
+        return [{"role": row["role"], "content": row["text"]} for row in rows]
+
+    async def search_knowledge(self, text_query: str, limit: int = 6) -> list[dict]:
+        return await self.db.search(text_query, limit=limit)
+
+    def memory_status(self) -> str:
+        if self.db:
+            return "I persist chat history in TitanFlow Core and replay the recent context each message."
+        return "This instance is running without persistent history; I only see what's in the current request."
+
 
 async def _notify_papa(bot: Bot | None, allowed_users: list[int], message: str) -> None:
     if not bot or not allowed_users:

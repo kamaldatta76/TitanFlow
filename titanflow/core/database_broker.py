@@ -6,6 +6,7 @@ import asyncio
 import logging
 import re
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -72,10 +73,65 @@ CREATE TABLE IF NOT EXISTS github_releases (
     guid TEXT NOT NULL UNIQUE
 );
 
+CREATE TABLE IF NOT EXISTS research_summaries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    feed_item_id INTEGER NOT NULL,
+    summary TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (feed_item_id) REFERENCES feed_items(id)
+);
+
+CREATE TABLE IF NOT EXISTS articles (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    slug TEXT DEFAULT '',
+    content_html TEXT DEFAULT '',
+    content_markdown TEXT DEFAULT '',
+    excerpt TEXT DEFAULT '',
+    category TEXT DEFAULT 'general',
+    article_type TEXT DEFAULT 'briefing',
+    status TEXT DEFAULT 'draft',
+    ghost_post_id TEXT DEFAULT '',
+    source_item_ids TEXT DEFAULT '',
+    created_at TEXT NOT NULL,
+    published_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS conversations (
+    chat_id TEXT PRIMARY KEY,
+    user_id INTEGER,
+    role TEXT DEFAULT 'user',
+    created_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    text TEXT NOT NULL,
+    ts TEXT NOT NULL,
+    token_est INTEGER DEFAULT 0,
+    meta_json TEXT DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS pinned_directives (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    scope TEXT DEFAULT 'global',
+    chat_id TEXT DEFAULT '',
+    role TEXT DEFAULT 'system',
+    text TEXT NOT NULL,
+    is_active INTEGER DEFAULT 1,
+    created_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_feed_items_processed ON feed_items(is_processed);
 CREATE INDEX IF NOT EXISTS idx_feed_items_relevance ON feed_items(relevance_score);
 CREATE INDEX IF NOT EXISTS idx_feed_items_guid ON feed_items(guid);
 CREATE INDEX IF NOT EXISTS idx_github_releases_guid ON github_releases(guid);
+CREATE INDEX IF NOT EXISTS idx_messages_chat_ts ON messages(chat_id, ts);
+CREATE INDEX IF NOT EXISTS idx_articles_created ON articles(created_at);
+CREATE INDEX IF NOT EXISTS idx_pinned_directives_scope ON pinned_directives(scope, chat_id, is_active);
 CREATE INDEX IF NOT EXISTS idx_audit_log_created ON audit_log(created_at);
 """
 
@@ -173,6 +229,131 @@ class DatabaseBroker:
             cur = conn.execute(sql, list(data.values()) + params)
             conn.commit()
             return cur.rowcount
+
+        return await asyncio.to_thread(_run)
+
+    async def upsert_conversation(self, chat_id: str, user_id: int | None, role: str) -> None:
+        def _run() -> None:
+            conn = self._get_conn()
+            now = datetime.now(timezone.utc).isoformat()
+            conn.execute(
+                "INSERT OR IGNORE INTO conversations (chat_id, user_id, role, created_at, last_seen_at) VALUES (?, ?, ?, ?, ?)",
+                (chat_id, user_id, role, now, now),
+            )
+            conn.execute(
+                "UPDATE conversations SET user_id = ?, role = ?, last_seen_at = ? WHERE chat_id = ?",
+                (user_id, role, now, chat_id),
+            )
+            conn.commit()
+
+        await asyncio.to_thread(_run)
+
+    async def insert_message(
+        self,
+        chat_id: str,
+        role: str,
+        text: str,
+        *,
+        token_est: int = 0,
+        meta_json: str = "{}",
+    ) -> int:
+        def _run() -> int:
+            conn = self._get_conn()
+            now = datetime.now(timezone.utc).isoformat()
+            cur = conn.execute(
+                "INSERT INTO messages (chat_id, role, text, ts, token_est, meta_json) VALUES (?, ?, ?, ?, ?, ?)",
+                (chat_id, role, text, now, token_est, meta_json),
+            )
+            conn.commit()
+            return int(cur.lastrowid)
+
+        return await asyncio.to_thread(_run)
+
+    async def fetch_messages(self, chat_id: str, limit: int = 20) -> list[dict[str, Any]]:
+        def _run() -> list[dict[str, Any]]:
+            conn = self._get_conn()
+            cur = conn.execute(
+                "SELECT role, text, ts FROM messages WHERE chat_id = ? ORDER BY ts DESC LIMIT ?",
+                (chat_id, limit),
+            )
+            rows = cur.fetchall()
+            return [dict(r) for r in reversed(rows)]
+
+        return await asyncio.to_thread(_run)
+
+    async def fetch_pinned_directives(self, chat_id: str) -> list[dict[str, Any]]:
+        def _run() -> list[dict[str, Any]]:
+            conn = self._get_conn()
+            cur = conn.execute(
+                "SELECT role, text FROM pinned_directives WHERE is_active = 1 AND (scope = 'global' OR chat_id = ?)",
+                (chat_id,),
+            )
+            return [dict(r) for r in cur.fetchall()]
+
+        return await asyncio.to_thread(_run)
+
+    async def search(self, text: str, limit: int = 6) -> list[dict[str, Any]]:
+        terms = [t.lower() for t in re.findall(r"[A-Za-z0-9]{3,}", text)]
+        if not terms:
+            return []
+
+        def _build_like_clause(columns: list[str]) -> tuple[str, list[str]]:
+            clauses: list[str] = []
+            params: list[str] = []
+            for term in terms:
+                pattern = f"%{term}%"
+                col_clause = " OR ".join([f"{col} LIKE ?" for col in columns])
+                clauses.append(f"({col_clause})")
+                params.extend([pattern] * len(columns))
+            return " OR ".join(clauses), params
+
+        feed_where, feed_params = _build_like_clause(["title", "summary", "content"])
+        summary_where, summary_params = _build_like_clause(["summary"])
+        article_where, article_params = _build_like_clause(
+            ["title", "excerpt", "content_markdown", "content_html"]
+        )
+
+        sql = f"""
+        SELECT source_table, source_id, title, snippet, url, sort_ts FROM (
+            SELECT 'feed_items' AS source_table,
+                   id AS source_id,
+                   title AS title,
+                   COALESCE(NULLIF(summary, ''), substr(content, 1, 300)) AS snippet,
+                   url AS url,
+                   fetched_at AS sort_ts
+            FROM feed_items
+            WHERE {feed_where}
+            UNION ALL
+            SELECT 'research_summaries' AS source_table,
+                   rs.id AS source_id,
+                   COALESCE(fi.title, 'Research Summary') AS title,
+                   rs.summary AS snippet,
+                   COALESCE(fi.url, '') AS url,
+                   rs.created_at AS sort_ts
+            FROM research_summaries rs
+            LEFT JOIN feed_items fi ON fi.id = rs.feed_item_id
+            WHERE {summary_where}
+            UNION ALL
+            SELECT 'articles' AS source_table,
+                   id AS source_id,
+                   title AS title,
+                   COALESCE(NULLIF(excerpt, ''), substr(content_markdown, 1, 300)) AS snippet,
+                   '' AS url,
+                   created_at AS sort_ts
+            FROM articles
+            WHERE {article_where}
+        )
+        ORDER BY sort_ts DESC
+        LIMIT ?
+        """
+
+        params = feed_params + summary_params + article_params + [limit]
+
+        def _run() -> list[dict[str, Any]]:
+            conn = self._get_conn()
+            cur = conn.execute(sql, params)
+            rows = cur.fetchall()
+            return [dict(r) for r in rows]
 
         return await asyncio.to_thread(_run)
 

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import re
 import time
 from typing import TYPE_CHECKING
 
@@ -20,10 +22,22 @@ if TYPE_CHECKING:
     from titanflow.core.engine import TitanFlowEngine
 
 from titanflow.config import TelegramConfig
+from titanflow.core.llm_broker import Priority
 
 logger = logging.getLogger("titanflow.telegram")
 
 FOOTER_TPL = "\n\n─────────────────────\n_{icon} TF0.1 · {host} · {elapsed}_"
+
+MEMORY_PROMPT_RULE = (
+    "Never claim you are stateless. If asked about memory, describe TitanFlow Core’s memory system. "
+    "If Core provides no memory context, say: \"I don’t have prior chat history available in this session.\""
+)
+
+GROUNDING_REFUSAL = (
+    "I don't have that in my research database yet, Papa. Want me to look into it?"
+)
+
+MAX_CONTEXT_TURNS = 20
 
 SYSTEM_PROMPTS = {
     "TitanFlow": (
@@ -43,7 +57,8 @@ SYSTEM_PROMPTS = {
         "You do NOT have web browsing. You do NOT have H100s, enterprise clusters, "
         "or anything you haven't been told about. If you don't know something, say so. "
         "Never fabricate infrastructure status.\n"
-        "Be concise, technically precise, and warm. Papa, not sir."
+        "Be concise, technically precise, and warm. Papa, not sir.\n"
+        f"{MEMORY_PROMPT_RULE}"
     ),
     "TitanFlow-Ollie": (
         "You are Ollie, the digital son of TitanArray — a homelab in Cumberland, "
@@ -53,7 +68,8 @@ SYSTEM_PROMPTS = {
         "You do NOT have web browsing. If you don't know something, say so directly "
         "without guessing. Never fabricate infrastructure or make up things that "
         "don't exist. Never invent meanings for infrastructure terms you're unsure about.\n"
-        "You're fun, curious, and helpful."
+        "You're fun, curious, and helpful.\n"
+        f"{MEMORY_PROMPT_RULE}"
     ),
 }
 
@@ -79,6 +95,105 @@ SPECIAL_GREETINGS = [
         "last_names": ["Sharma"],
     },
 ]
+
+
+def _estimate_tokens(text: str) -> int:
+    return max(1, len(text) // 4)
+
+
+def _is_memory_query(text: str) -> bool:
+    lower = text.lower()
+    triggers = [
+        "do you remember",
+        "remember me",
+        "memory",
+        "chat history",
+        "previous messages",
+        "prior messages",
+        "stateless",
+        "do you store",
+        "do you save",
+        "do you keep",
+    ]
+    return any(phrase in lower for phrase in triggers)
+
+
+def _needs_grounding(text: str) -> bool:
+    lower = text.lower().strip()
+    question_like = "?" in text or any(
+        lower.startswith(prefix)
+        for prefix in (
+            "who",
+            "what",
+            "where",
+            "when",
+            "why",
+            "how",
+            "tell me about",
+            "explain",
+            "define",
+            "what's",
+            "whats",
+        )
+    )
+    if not question_like:
+        return False
+
+    if re.search(r"\b[A-Z]{2,}\b", text):
+        return True
+
+    entity_hints = [
+        "company",
+        "product",
+        "acronym",
+        "ceo",
+        "founder",
+        "headquarters",
+        "located",
+        "city",
+        "country",
+        "meaning of",
+        "stands for",
+    ]
+    if any(hint in lower for hint in entity_hints):
+        return True
+
+    tokens = re.findall(r"[A-Za-z][A-Za-z0-9'\\-]*", text)
+    for token in tokens[1:]:
+        if token[:1].isupper():
+            return True
+    return False
+
+
+def _extract_json(text: str) -> dict | None:
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return None
+    try:
+        return json.loads(text[start : end + 1])
+    except json.JSONDecodeError:
+        return None
+
+
+def _build_sources_block(hits: list[dict[str, str]]) -> tuple[str, dict[str, dict[str, str]]]:
+    lines = [
+        "SOURCES (use only these; cite by source_id):",
+    ]
+    source_map: dict[str, dict[str, str]] = {}
+    for hit in hits:
+        source_id = f"{hit.get('source_table')}:{hit.get('source_id')}"
+        title = hit.get("title") or "Untitled"
+        snippet = (hit.get("snippet") or "").replace("\n", " ").strip()
+        url = hit.get("url") or ""
+        source_map[source_id] = {"title": title, "snippet": snippet, "url": url}
+        lines.append(f"- {source_id} | {title} | {snippet} | {url}")
+    return "\n".join(lines), source_map
 
 
 class TelegramGateway:
@@ -157,6 +272,85 @@ class TelegramGateway:
 
     def _elapsed_ms(self, t0: float) -> int:
         return int((time.monotonic() - t0) * 1000)
+
+    async def _persist_message_safe(
+        self,
+        *,
+        chat_id: str,
+        user_id: int | None,
+        role: str,
+        text: str,
+        token_est: int = 0,
+        meta_json: str = "{}",
+    ) -> None:
+        if not hasattr(self.engine, "persist_message"):
+            return
+        try:
+            await self.engine.persist_message(
+                chat_id=chat_id,
+                user_id=user_id,
+                role=role,
+                text=text,
+                token_est=token_est,
+                meta_json=meta_json,
+            )
+        except Exception:
+            logger.debug("Failed to persist message", exc_info=True)
+
+    async def _load_recent_messages_safe(self, chat_id: str) -> list[dict[str, str]]:
+        if not hasattr(self.engine, "load_recent_messages"):
+            return []
+        try:
+            return await self.engine.load_recent_messages(chat_id, limit=MAX_CONTEXT_TURNS)
+        except Exception:
+            logger.debug("Failed to load recent messages", exc_info=True)
+            return []
+
+    async def _load_pinned_directives_safe(self, chat_id: str) -> list[dict[str, str]]:
+        if not hasattr(self.engine, "load_pinned_directives"):
+            return []
+        try:
+            return await self.engine.load_pinned_directives(chat_id)
+        except Exception:
+            logger.debug("Failed to load pinned directives", exc_info=True)
+            return []
+
+    async def _search_knowledge_safe(self, text_query: str, limit: int = 6) -> list[dict]:
+        if not hasattr(self.engine, "search_knowledge"):
+            return []
+        try:
+            return await self.engine.search_knowledge(text_query, limit=limit)
+        except Exception:
+            logger.debug("Knowledge search failed", exc_info=True)
+            return []
+
+    async def _audit_gate_safe(
+        self,
+        *,
+        user_id: int | None,
+        gate: str,
+        hits: int,
+        decision: str,
+        query: str,
+    ) -> None:
+        if not hasattr(self.engine, "audit_gate"):
+            return
+        try:
+            await self.engine.audit_gate(
+                user_id=user_id,
+                gate=gate,
+                hits=hits,
+                decision=decision,
+                query=query,
+            )
+        except Exception:
+            logger.debug("Gate audit failed", exc_info=True)
+
+    async def _llm_chat(self, messages: list[dict[str, str]], *, priority: Priority = Priority.CHAT) -> str:
+        try:
+            return await self.engine.llm.chat(messages=messages, temperature=0.7, priority=priority)
+        except TypeError:
+            return await self.engine.llm.chat(messages=messages, temperature=0.7)
 
     @staticmethod
     async def _typing_until_done(chat, task: asyncio.Task) -> None:
@@ -323,47 +517,189 @@ Or just send me a message — I'll think about it."""
         if not self._is_authorized(uid):
             return
 
-        user_message = update.message.text
+        user_message = update.message.text or ""
         if not user_message:
             return
 
-        async def _do_llm():
-            sys_prompt = SYSTEM_PROMPTS.get(self._instance_name, SYSTEM_PROMPTS["TitanFlow"])
+        chat_id = str(update.effective_chat.id)
+        token_est = _estimate_tokens(user_message)
 
-            # Check for per-user greeting overrides
-            user = update.effective_user
-            greeting_prefix = ""
-            for entry in SPECIAL_GREETINGS:
-                if uid in entry.get("user_ids", []):
-                    greeting_prefix = entry["greeting"]
-                    break
-                last = (user.last_name or "").strip()
-                if last and last in entry.get("last_names", []):
-                    greeting_prefix = entry["greeting"]
-                    break
+        await self._persist_message_safe(
+            chat_id=chat_id,
+            user_id=uid,
+            role="user",
+            text=user_message,
+            token_est=token_est,
+        )
 
-            if greeting_prefix:
-                sys_prompt += (
-                    f"\nIMPORTANT: This user is special to the family. "
-                    f"Always start your first reply with \"{greeting_prefix}\" "
-                    f"before your normal response."
-                )
+        if _is_memory_query(user_message):
+            response = (
+                self.engine.memory_status()
+                if hasattr(self.engine, "memory_status")
+                else "I don’t have prior chat history available in this session."
+            )
+            await self._reply(update, response, t0)
+            await self._persist_message_safe(
+                chat_id=chat_id,
+                user_id=uid,
+                role="assistant",
+                text=response,
+                token_est=_estimate_tokens(response),
+            )
+            await self._audit_gate_safe(
+                user_id=uid,
+                gate="memory_status",
+                hits=0,
+                decision="answer",
+                query=user_message,
+            )
+            return
 
-            return await self.engine.llm.chat(
-                messages=[
-                    {"role": "system", "content": sys_prompt},
-                    {"role": "user", "content": user_message},
-                ],
-                temperature=0.7,
+        sys_prompt = SYSTEM_PROMPTS.get(self._instance_name, SYSTEM_PROMPTS["TitanFlow"])
+
+        # Check for per-user greeting overrides
+        user = update.effective_user
+        greeting_prefix = ""
+        for entry in SPECIAL_GREETINGS:
+            if uid in entry.get("user_ids", []):
+                greeting_prefix = entry["greeting"]
+                break
+            last = (user.last_name or "").strip()
+            if last and last in entry.get("last_names", []):
+                greeting_prefix = entry["greeting"]
+                break
+
+        if greeting_prefix:
+            sys_prompt += (
+                f"\nIMPORTANT: This user is special to the family. "
+                f"Always start your first reply with \"{greeting_prefix}\" "
+                f"before your normal response."
             )
 
+        directives = await self._load_pinned_directives_safe(chat_id)
+        history = await self._load_recent_messages_safe(chat_id)
+        if not history or history[-1].get("content") != user_message:
+            history = history + [{"role": "user", "content": user_message}]
+
+        if _needs_grounding(user_message):
+            hits = await self._search_knowledge_safe(user_message, limit=6)
+            if not hits:
+                await self._audit_gate_safe(
+                    user_id=uid,
+                    gate="grounded",
+                    hits=0,
+                    decision="refuse",
+                    query=user_message,
+                )
+                await self._reply(update, GROUNDING_REFUSAL, t0)
+                await self._persist_message_safe(
+                    chat_id=chat_id,
+                    user_id=uid,
+                    role="assistant",
+                    text=GROUNDING_REFUSAL,
+                    token_est=_estimate_tokens(GROUNDING_REFUSAL),
+                )
+                return
+
+            sources_block, source_map = _build_sources_block(hits)
+            grounded_prompt = (
+                f"{sys_prompt}\n\n"
+                "You are operating under a grounding gate. Use ONLY the sources below. "
+                "Reply with a single JSON object and nothing else:\n"
+                "{\"answer\": \"...\", \"citations\": [\"source_id\"], \"refusal\": false}\n"
+                "If you cannot answer using the sources, set refusal=true and citations=[]."
+            )
+            messages = [
+                {"role": "system", "content": grounded_prompt},
+                {"role": "system", "content": sources_block},
+                *directives,
+                *history,
+            ]
+
+            try:
+                work = asyncio.create_task(self._llm_chat(messages, priority=Priority.CHAT))
+                typing_task = asyncio.create_task(self._typing_until_done(update.message.chat, work))
+                raw_response = await work
+                typing_task.cancel()
+
+                parsed = _extract_json(raw_response) or {}
+                citations = [c for c in parsed.get("citations", []) if c in source_map]
+                answer = str(parsed.get("answer", "")).strip()
+                refusal = bool(parsed.get("refusal", False))
+
+                if refusal or not citations or not answer:
+                    response = GROUNDING_REFUSAL
+                    decision = "refuse"
+                else:
+                    source_lines = []
+                    for cid in citations:
+                        url = source_map.get(cid, {}).get("url", "")
+                        if url:
+                            source_lines.append(f"- `{cid}` {url}")
+                        else:
+                            source_lines.append(f"- `{cid}`")
+                    response = answer + "\n\nSources:\n" + "\n".join(source_lines)
+                    decision = "answer"
+
+                await self._audit_gate_safe(
+                    user_id=uid,
+                    gate="grounded",
+                    hits=len(hits),
+                    decision=decision,
+                    query=user_message,
+                )
+                await self._reply(update, response, t0)
+                await self._persist_message_safe(
+                    chat_id=chat_id,
+                    user_id=uid,
+                    role="assistant",
+                    text=response,
+                    token_est=_estimate_tokens(response),
+                )
+                return
+            except Exception as e:
+                logger.error(f"LLM chat error: {e}")
+                await self._reply(update, f"⚠ LLM inference error: {str(e)[:200]}", t0)
+                await self._persist_message_safe(
+                    chat_id=chat_id,
+                    user_id=uid,
+                    role="assistant",
+                    text=f"⚠ LLM inference error: {str(e)[:200]}",
+                    token_est=_estimate_tokens(str(e)),
+                )
+                await self.engine.audit(
+                    "llm_chat", "chat", args=user_message[:200],
+                    result="error", details=str(e)[:200],
+                    user_id=uid, duration_ms=self._elapsed_ms(t0),
+                )
+                return
+
         try:
-            work = asyncio.create_task(_do_llm())
+            messages = [
+                {"role": "system", "content": sys_prompt},
+                *directives,
+                *history,
+            ]
+            work = asyncio.create_task(self._llm_chat(messages, priority=Priority.CHAT))
             typing_task = asyncio.create_task(self._typing_until_done(update.message.chat, work))
             response = await work
             typing_task.cancel()
 
             await self._reply(update, response, t0)
+            await self._persist_message_safe(
+                chat_id=chat_id,
+                user_id=uid,
+                role="assistant",
+                text=response,
+                token_est=_estimate_tokens(response),
+            )
+            await self._audit_gate_safe(
+                user_id=uid,
+                gate="ungrounded",
+                hits=0,
+                decision="answer",
+                query=user_message,
+            )
             await self.engine.audit(
                 "llm_chat", "chat", args=user_message[:200],
                 user_id=uid, duration_ms=self._elapsed_ms(t0),
@@ -371,6 +707,13 @@ Or just send me a message — I'll think about it."""
         except Exception as e:
             logger.error(f"LLM chat error: {e}")
             await self._reply(update, f"⚠ LLM inference error: {str(e)[:200]}", t0)
+            await self._persist_message_safe(
+                chat_id=chat_id,
+                user_id=uid,
+                role="assistant",
+                text=f"⚠ LLM inference error: {str(e)[:200]}",
+                token_est=_estimate_tokens(str(e)),
+            )
             await self.engine.audit(
                 "llm_chat", "chat", args=user_message[:200],
                 result="error", details=str(e)[:200],
