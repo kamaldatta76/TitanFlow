@@ -10,7 +10,7 @@ logging.basicConfig(level=logging.INFO)
 
 
 def main() -> None:
-    socket_path = "/run/titanflow/telemetry.sock"
+    socket_path = "/run/titanflow-core/telemetry.sock"
     server = TelemetryHTTPBridge(("0.0.0.0", 19100), TelemetryBridgeHandler, socket_path)
     server.serve_forever()
 

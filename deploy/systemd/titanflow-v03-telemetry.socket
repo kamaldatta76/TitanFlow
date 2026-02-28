@@ -2,7 +2,7 @@
 Description=TitanFlow v0.3 Telemetry Socket
 
 [Socket]
-ListenStream=/run/titanflow/telemetry.sock
+ListenStream=/run/titanflow-core/telemetry.sock
 SocketMode=0600
 Backlog=64
 

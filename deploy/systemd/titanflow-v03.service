@@ -15,14 +15,16 @@ RuntimeDirectoryMode=0750
 WorkingDirectory=/opt/titanflow
 ExecStart=/opt/titanflow/.venv/bin/python -m titanflow.v03.run
 
-Environment=TITANFLOW_DB_PATH=/data/titanflow/titanflow.db
-Environment=TITANFLOW_TELEMETRY_SOCKET=/run/titanflow/telemetry.sock
+Environment=TITANFLOW_DB_PATH=/var/lib/titanflow/core/titanflow.db
+Environment=TITANFLOW_TELEMETRY_SOCKET=/run/titanflow-core/telemetry.sock
+Environment=TITANFLOW_CORE_SOCKET=/run/titanflow-core/core.sock
 
 NoNewPrivileges=true
 PrivateTmp=true
 PrivateDevices=true
 ProtectSystem=strict
 ProtectHome=true
+ReadWritePaths=/var/lib/titanflow/core /run/titanflow-core
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 RestrictNamespaces=true
 LockPersonality=true
