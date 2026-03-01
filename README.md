@@ -13,7 +13,7 @@ TitanFlow is an AI orchestration microkernel for running autonomous agents with 
 - Configurable identity via `SOUL.md`
 - Built-in health/ops surfaces
 
-## Quick Start (Local)
+## Quick Start
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
