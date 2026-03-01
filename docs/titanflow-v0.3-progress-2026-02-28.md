@@ -93,7 +93,7 @@ This log captures all work completed so far for the TitanFlow v0.3 microkernel s
 
 ## Backups
 - Pre-0.3 scaffold archive created:
-  - `~/Backups/TitanFlow/Charlie/2026-02-28/pre-0.3-scaffold/titanflow-repo-full-2026-02-28-pre-0.3-scaffold.tar.gz`
+  - `/Users/kamaldatta/Documents/TitanArray/Backups/TitanFlow/Charlie/2026-02-28/pre-0.3-scaffold/titanflow-repo-full-2026-02-28-pre-0.3-scaffold.tar.gz`
   - SHA256: `6dda0cbffba41ea409e519aa82446ea0241bd2aa0d20dc268464f59dd1e82e68`
 
 ## Next Steps (Per User Request)
@@ -158,5 +158,5 @@ This log captures all work completed so far for the TitanFlow v0.3 microkernel s
 
 **Backups**
 - Updated deploy package:
-  - `~/Backups/TitanFlow/Charlie/2026-02-28/titanflow-v03-deploy-package.tar.gz`
+  - `/Users/kamaldatta/Documents/TitanArray/Backups/TitanFlow/Charlie/2026-02-28/titanflow-v03-deploy-package.tar.gz`
   - SHA256 stored alongside as `.sha256`.

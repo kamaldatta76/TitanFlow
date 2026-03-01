@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import json
 from typing import Any
 
@@ -17,7 +18,12 @@ class IPCTransport:
         self._server_task: asyncio.AbstractServer | None = None
 
     async def start(self) -> None:
+        # Remove stale socket if present
+        if os.path.exists(self._socket_path):
+            os.unlink(self._socket_path)
         self._server_task = await asyncio.start_unix_server(self._handle, path=self._socket_path)
+        # Make socket world-writable so gateway (DynamicUser) can connect
+        os.chmod(self._socket_path, 0o666)
 
     async def stop(self) -> None:
         if self._server_task:

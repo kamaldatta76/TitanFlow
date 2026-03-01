@@ -24,6 +24,23 @@ class ModuleBaseIPC:
         self._heartbeat_interval = int(os.environ.get("TITANFLOW_HEARTBEAT_INTERVAL", "60"))
         self._heartbeat_task: asyncio.Task | None = None
 
+    # ── v0.2 Engine compatibility shim ──────────────────────
+    @property
+    def name(self) -> str:
+        return self.module_id
+
+    description: str = ""
+    enabled: bool = True
+
+    async def stop(self) -> None:
+        if self._heartbeat_task:
+            self._heartbeat_task.cancel()
+        if self._writer:
+            self._writer.close()
+
+    async def handle_telegram(self, command: str, args: str, context: Any) -> str | None:
+        return None
+
     async def start(self) -> None:
         self._reader, self._writer = await asyncio.open_unix_connection(self.core_socket)
         token_path = os.environ.get("TITANFLOW_MODULE_TOKEN", f"/etc/titanflow/secrets/{self.module_id}.token")
