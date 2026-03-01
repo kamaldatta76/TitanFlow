@@ -1,6 +1,6 @@
 {
   "meta": {
-    "generated_at": "2026-03-01T19:25:31Z",
+    "generated_at": "2026-03-01T20:51:11Z",
     "source": "aggregated:live"
   },
   "nodes": [
@@ -105,7 +105,53 @@
         "Workstation",
         "GPU inference",
         "Docker services"
-      ]
+      ],
+      "firewall": {
+        "ufw": {
+          "status": "active",
+          "default_incoming": "deny",
+          "default_outgoing": "allow",
+          "default_routed": "deny",
+          "rules": [
+            "8100/tcp ALLOW IN 10.0.0.0/24",
+            "22/tcp ALLOW IN 10.0.0.0/24",
+            "18789/tcp ALLOW IN 10.0.0.0/24",
+            "3000/tcp ALLOW IN 10.0.0.0/24",
+            "80 ALLOW IN 10.0.0.0/16",
+            "11434/tcp ALLOW IN 10.0.0.0/24",
+            "8090/tcp ALLOW IN 10.0.0.0/24",
+            "5230/tcp ALLOW IN 10.0.0.0/24",
+            "3420/tcp ALLOW IN 10.0.0.0/24"
+          ],
+          "source": "ufw:status:2026-03-01T20:51:11Z"
+        },
+        "listeners": [
+          {
+            "port": 8090,
+            "proto": "tcp",
+            "process": "docker-proxy",
+            "container": "glance",
+            "mapping": "8090->8080",
+            "source": "ss -tlnp:2026-03-01T20:48:54Z"
+          },
+          {
+            "port": 5230,
+            "proto": "tcp",
+            "process": "docker-proxy",
+            "container": "memos",
+            "mapping": "5230->5230",
+            "source": "ss -tlnp:2026-03-01T20:48:54Z"
+          },
+          {
+            "port": 3420,
+            "proto": "tcp",
+            "process": "docker-proxy",
+            "container": "dockpeek",
+            "mapping": "3420->8000",
+            "source": "ss -tlnp:2026-03-01T20:48:54Z"
+          }
+        ]
+      }
     },
     {
       "name": "TitanSarge",
@@ -223,7 +269,44 @@
         "DNS primary"
       ],
       "gpu_verified": true,
-      "gpu_active": true
+      "gpu_active": true,
+      "firewall": {
+        "ufw": {
+          "status": "active",
+          "default_incoming": "deny",
+          "default_outgoing": "allow",
+          "default_routed": "deny",
+          "rules": [
+            "22/tcp ALLOW IN 10.0.0.0/24",
+            "11434/tcp ALLOW IN 10.0.0.0/24",
+            "18789 ALLOW IN 10.0.0.0/24",
+            "9090/tcp ALLOW IN 10.0.0.0/24",
+            "10000/tcp ALLOW IN 10.0.0.0/24"
+          ],
+          "source": "ufw:status:2026-03-01T20:51:11Z"
+        },
+        "iptables": {
+          "input_policy": "DROP",
+          "source": "iptables:INPUT:2026-03-01T20:48:54Z"
+        },
+        "listeners": [
+          {
+            "port": 9090,
+            "proto": "tcp",
+            "process": "systemd",
+            "service": "cockpit.socket",
+            "source": "ss -tlnp:2026-03-01T20:48:54Z"
+          },
+          {
+            "port": 10000,
+            "proto": "tcp",
+            "process": "node",
+            "cmd": "/usr/bin/node build",
+            "cwd": "/opt/titan-home-portal",
+            "source": "ss -tlnp:2026-03-01T20:48:54Z"
+          }
+        ]
+      }
     },
     {
       "name": "TitanShark",
@@ -270,7 +353,50 @@
         "Inference node",
         "GPU compute",
         "Ollama"
-      ]
+      ],
+      "firewall": {
+        "ufw": {
+          "status": "active",
+          "default_incoming": "deny",
+          "default_outgoing": "allow",
+          "default_routed": "disabled",
+          "rules": [
+            "22/tcp ALLOW IN 10.0.0.0/24",
+            "11434/tcp ALLOW IN 10.0.0.0/24"
+          ],
+          "source": "ufw:status:2026-03-01T20:51:11Z"
+        },
+        "iptables": {
+          "input_policy": "DROP",
+          "source": "iptables:INPUT:2026-03-01T20:48:54Z"
+        },
+        "listeners": [
+          {
+            "port": 22,
+            "proto": "tcp",
+            "process": "sshd",
+            "source": "ss -tlnp:2026-03-01T20:48:54Z"
+          },
+          {
+            "port": 11434,
+            "proto": "tcp",
+            "process": "ollama",
+            "source": "ss -tlnp:2026-03-01T20:48:54Z"
+          },
+          {
+            "port": 19999,
+            "proto": "tcp",
+            "process": "netdata",
+            "source": "ss -tlnp:2026-03-01T20:48:54Z"
+          },
+          {
+            "port": 5355,
+            "proto": "tcp",
+            "process": "systemd-resolve",
+            "source": "ss -tlnp:2026-03-01T20:48:54Z"
+          }
+        ]
+      }
     },
     {
       "name": "TitanStream",
@@ -312,7 +438,53 @@
       "roles": [
         "Secondary infrastructure",
         "DNS redundancy"
-      ]
+      ],
+      "firewall": {
+        "ufw": {
+          "status": "active",
+          "default_incoming": "deny",
+          "default_outgoing": "allow",
+          "default_routed": "deny",
+          "rules": [
+            "22/tcp ALLOW IN 10.0.0.0/24",
+            "11434/tcp ALLOW IN 10.0.0.0/24",
+            "3389/tcp ALLOW IN 10.0.0.0/24",
+            "9090/tcp ALLOW IN 10.0.0.0/24"
+          ],
+          "source": "ufw:status:2026-03-01T20:51:11Z"
+        },
+        "iptables": {
+          "input_policy": "DROP",
+          "source": "iptables:INPUT:2026-03-01T20:48:54Z"
+        },
+        "listeners": [
+          {
+            "port": 11434,
+            "proto": "tcp",
+            "process": "ollama",
+            "source": "ss -tlnp:2026-03-01T20:48:54Z"
+          },
+          {
+            "port": 22,
+            "proto": "tcp",
+            "process": "sshd",
+            "source": "ss -tlnp:2026-03-01T20:48:54Z"
+          },
+          {
+            "port": 3389,
+            "proto": "tcp",
+            "process": "gnome-remote-de",
+            "source": "ss -tlnp:2026-03-01T20:48:54Z"
+          },
+          {
+            "port": 9090,
+            "proto": "tcp",
+            "process": "systemd",
+            "service": "cockpit.socket",
+            "source": "ss -tlnp:2026-03-01T20:48:54Z"
+          }
+        ]
+      }
     }
   ],
   "services": [
