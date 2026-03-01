@@ -36,32 +36,85 @@ def _validate_ollama_url(url: str) -> str:
 
 
 def _safe_extract_ollama_generate(response: Any) -> str:
-    """Extract text from Ollama /api/generate response with structure validation."""
-    if not isinstance(response, dict):
-        raise TypeError(f"Ollama generate: expected dict, got {type(response).__name__}")
-    text = response.get("response")
-    if text is None:
-        raise ValueError(
-            f"Ollama generate: missing 'response' key. Keys present: {sorted(response.keys())}"
-        )
-    return str(text)
+    """Extract text from Ollama /api/generate response with structure validation.
+
+    Handles both raw dicts (from _OllamaHTTPClient) and Pydantic
+    GenerateResponse objects (from ollama.AsyncClient).
+    """
+    # SDK Pydantic object (GenerateResponse) — attribute access
+    if hasattr(response, "response") and not isinstance(response, dict):
+        text = response.response
+        if text is None:
+            raise ValueError(
+                f"Ollama generate: GenerateResponse.response is None "
+                f"(type={type(response).__name__})"
+            )
+        return str(text)
+
+    # Raw dict from HTTP fallback
+    if isinstance(response, dict):
+        text = response.get("response")
+        if text is None:
+            raise ValueError(
+                f"Ollama generate: missing 'response' key. Keys present: {sorted(response.keys())}"
+            )
+        return str(text)
+
+    raise TypeError(
+        f"Ollama generate: expected dict or GenerateResponse, got {type(response).__name__}"
+    )
 
 
 def _safe_extract_ollama_chat(response: Any) -> str:
-    """Extract text from Ollama /api/chat response with structure validation."""
-    if not isinstance(response, dict):
-        raise TypeError(f"Ollama chat: expected dict, got {type(response).__name__}")
-    message = response.get("message")
-    if not isinstance(message, dict):
-        raise ValueError(
-            f"Ollama chat: 'message' missing or not a dict. Keys present: {sorted(response.keys())}"
-        )
-    content = message.get("content")
-    if content is None:
-        raise ValueError(
-            f"Ollama chat: 'message.content' is None. Message keys: {sorted(message.keys())}"
-        )
-    return str(content)
+    """Extract text from Ollama /api/chat response with structure validation.
+
+    Handles both raw dicts (from _OllamaHTTPClient) and Pydantic
+    ChatResponse objects (from ollama.AsyncClient).
+    """
+    # SDK Pydantic object (ChatResponse) — attribute access
+    if hasattr(response, "message") and not isinstance(response, dict):
+        message = response.message
+        if message is None:
+            raise ValueError(
+                f"Ollama chat: ChatResponse.message is None "
+                f"(type={type(response).__name__})"
+            )
+        # Message object has .content attribute (or might be a dict in edge cases)
+        if hasattr(message, "content"):
+            content = message.content
+        elif isinstance(message, dict):
+            content = message.get("content")
+        else:
+            raise ValueError(
+                f"Ollama chat: ChatResponse.message has no 'content'. "
+                f"Message type={type(message).__name__}"
+            )
+        if content is None:
+            raise ValueError(
+                f"Ollama chat: ChatResponse.message.content is None "
+                f"(message type={type(message).__name__})"
+            )
+        return str(content)
+
+    # Raw dict from HTTP fallback
+    if isinstance(response, dict):
+        message = response.get("message")
+        if not isinstance(message, dict):
+            raise ValueError(
+                f"Ollama chat: 'message' missing or not a dict. "
+                f"Keys present: {sorted(response.keys())}"
+            )
+        content = message.get("content")
+        if content is None:
+            raise ValueError(
+                f"Ollama chat: 'message.content' is None. "
+                f"Message keys: {sorted(message.keys())}"
+            )
+        return str(content)
+
+    raise TypeError(
+        f"Ollama chat: expected dict or ChatResponse, got {type(response).__name__}"
+    )
 
 
 def _safe_extract_anthropic(data: Any) -> str:
