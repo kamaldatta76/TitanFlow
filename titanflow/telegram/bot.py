@@ -333,7 +333,7 @@ def _strip_tool_call_line(text: str) -> str:
 
 
 # Maximum tool invocation rounds per message (prevents infinite loops)
-MAX_TOOL_ROUNDS = 5
+MAX_TOOL_ROUNDS = 25
 MAX_TOOL_RESULT_CHARS = 2000
 
 
