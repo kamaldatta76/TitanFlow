@@ -1,0 +1,50 @@
+defaults:
+  provider_mode: western_only
+  excluded_models:
+    - minimax-m2.5
+    - qwen-flash
+  warning_thresholds: [0.80, 0.95]
+  mode: fixed
+  auto_strategy: quality
+  hard_cap: false
+  local_ollama_configured: false
+  status: active
+
+tiers:
+  free:
+    display_name: "TitanOcta Free"
+    price: 0
+    credit_limit: 0.0
+    available_models: [ollama-local]
+    soft_cap_strategy: null
+    byok: false
+
+  builder:
+    display_name: "TitanOcta Builder"
+    price: 20
+    credit_limit: 0.0
+    available_models: [all-byok]
+    soft_cap_strategy: null
+    byok: true
+
+  pro:
+    display_name: "TitanOcta Pro"
+    price: 49
+    credit_limit: 15.0
+    available_models:
+      - gpt-5-nano
+      - gpt-5-mini
+      - claude-haiku-4-5
+      - minimax-m2.5
+      - qwen-flash
+      - ollama-local
+    soft_cap_strategy: cheapest_allowed
+    byok: false
+
+  ultra:
+    display_name: "TitanOcta Ultra"
+    price: 99
+    credit_limit: 40.0
+    available_models: [all]
+    soft_cap_strategy: cheapest_allowed
+    byok: false
