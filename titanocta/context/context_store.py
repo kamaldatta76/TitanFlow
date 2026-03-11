@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 import sqlite3
-from typing import Iterable
 
 
 @dataclass(frozen=True)
@@ -74,6 +73,7 @@ class ContextStore:
         limit: int = 50,
         min_score: float = 0.0,
         only_durable: bool = False,
+        exclude_kind: str | None = None,
     ) -> list[ContextEntry]:
         conn = self._connect()
         rows = conn.execute(
@@ -81,13 +81,44 @@ class ContextStore:
             select id, user_id, session_id, role, content, score, token_estimate, durable, kind, created_at
             from context_entries
             where user_id = ? and session_id = ? and score >= ? and (? = 0 or durable = 1)
+              and (? is null or kind != ?)
             order by id desc
             limit ?
             """,
-            (user_id, session_id, float(min_score), 1 if only_durable else 0, int(limit)),
+            (
+                user_id,
+                session_id,
+                float(min_score),
+                1 if only_durable else 0,
+                exclude_kind,
+                exclude_kind,
+                int(limit),
+            ),
         ).fetchall()
         conn.close()
         return [self._row_to_entry(row) for row in rows]
+
+    def durable_fact_exists(self, *, user_id: str, session_id: str, content: str) -> bool:
+        conn = self._connect()
+        row = conn.execute(
+            """
+            select 1 from context_entries
+            where user_id = ? and session_id = ? and kind = 'durable_fact' and content = ?
+            limit 1
+            """,
+            (user_id, session_id, content),
+        ).fetchone()
+        conn.close()
+        return row is not None
+
+    def update_score(self, *, entry_id: int, score: float) -> None:
+        conn = self._connect()
+        conn.execute(
+            "update context_entries set score = ? where id = ?",
+            (float(score), int(entry_id)),
+        )
+        conn.commit()
+        conn.close()
 
     def total_tokens(
         self,

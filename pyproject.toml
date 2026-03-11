@@ -23,6 +23,9 @@ dependencies = [
     "python-dateutil>=2.9.0",
 ]
 
+[project.scripts]
+titanocta = "titanocta.cli:main"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
@@ -32,7 +35,11 @@ dev = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+
+[tool.hatch.build.targets.wheel]
+packages = ["titanflow", "titanocta"]

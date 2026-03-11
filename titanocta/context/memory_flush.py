@@ -52,22 +52,26 @@ class MemoryFlusher:
             session_id=session_id,
             min_score=self._min_score,
             limit=30,
+            exclude_kind="durable_fact",
         )
         durable_count = 0
         for entry in entries:
             fact = self._extract_durable_fact(entry.content)
             if not fact:
                 continue
-            self._store.add_entry(
-                user_id=user_id,
-                session_id=session_id,
-                role="system",
-                content=fact,
-                score=max(0.6, entry.score),
-                durable=True,
-                kind="durable_fact",
-            )
-            durable_count += 1
+            if not self._store.durable_fact_exists(user_id=user_id, session_id=session_id, content=fact):
+                self._store.add_entry(
+                    user_id=user_id,
+                    session_id=session_id,
+                    role="system",
+                    content=fact,
+                    score=max(0.6, entry.score),
+                    durable=True,
+                    kind="durable_fact",
+                )
+                durable_count += 1
+            # Prevent accumulation: source entries that yielded durable facts are demoted.
+            self._store.update_score(entry_id=entry.id, score=0.0)
 
         return FlushResult(
             flushed=True,
