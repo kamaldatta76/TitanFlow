@@ -1,0 +1,80 @@
+=== Fleet Inference Baseline (2026-03-11) ===
+Collected from MBA via SSH.
+
+--- Sarge (10.0.0.33) ---
+hostname: TitanSarge
+OLLAMA:
+  Error: could not connect to ollama server, run 'ollama serve' to start it
+GPU:
+  NVIDIA GeForce RTX 5060 Ti, 16311 MiB, 336 MiB used
+DOCKER:
+  livekit|livekit/livekit-server:latest|Up 23 hours
+  prometheus|prom/prometheus:latest|Up 2 days
+  plausible|ghcr.io/plausible/community-edition:v2.1|Up 23 hours
+  plausible-db|postgres:16-alpine|Up 2 days (healthy)
+  plausible-events-db|clickhouse/clickhouse-server:24.3.3.102-alpine|Up 23 hours (healthy)
+  perf-site|nginx:alpine|Up 2 days
+  flarum|mondedie/flarum:stable|Up 23 hours
+  listmonk|listmonk/listmonk:latest|Up 2 days
+  listmonk-db|postgres:15-alpine|Up 2 days
+  flarum-db|mariadb:10.11|Up 23 hours
+  titangit-landing|nginx:alpine|Up 23 hours
+  titangit|gitea/gitea:latest|Up 23 hours
+  nginx-titanoctopii|nginx:alpine|Up 2 days
+  nginx-titanoctopus|nginx:alpine|Up 2 days
+  nginx-titanflow|nginx:alpine|Up 2 days
+  npm|jc21/nginx-proxy-manager:latest|Up 23 hours
+  signal-cli-rest-api|bbernhard/signal-cli-rest-api|Up 23 hours (healthy)
+  moltis|ghcr.io/moltis-org/moltis:latest|Up 2 days
+  pihole_dns_secondary|pihole/pihole:latest|Up 23 hours (healthy)
+  unbound_dns_secondary|mvance/unbound:latest|Up 23 hours (healthy)
+  grafana|grafana/grafana:latest|Up 2 days
+  authentik-worker|ghcr.io/goauthentik/server:latest|Up 23 hours (healthy)
+  authentik-server|ghcr.io/goauthentik/server:latest|Up 23 hours (healthy)
+  authentik-postgres|postgres:16-alpine|Up 23 hours
+  authentik-redis|redis:alpine|Up 23 hours
+  technitium_dns_primary|technitium/dns-server:latest|Up 2 days
+
+--- Shadow (10.0.0.32) ---
+hostname: TitanShadow
+OLLAMA:
+  Error: could not connect to ollama server, run 'ollama serve' to start it
+GPU:
+  NVIDIA GeForce RTX 4070, 12282 MiB, 76 MiB used
+DOCKER:
+  milvus-standalone|milvusdb/milvus:v2.6.12|Up 7 hours (healthy)
+  mailcowdockerized-watchdog-mailcow-1|ghcr.io/mailcow/watchdog:2.09|Up 23 hours
+  mailcowdockerized-acme-mailcow-1|ghcr.io/mailcow/acme:1.95|Up 23 hours
+  mailcowdockerized-nginx-mailcow-1|ghcr.io/mailcow/nginx:1.05|Up 23 hours
+  mailcowdockerized-ofelia-mailcow-1|mcuadros/ofelia:latest|Up 23 hours
+  mailcowdockerized-rspamd-mailcow-1|ghcr.io/mailcow/rspamd:3.14.2|Up About a minute
+  mailcowdockerized-dovecot-mailcow-1|ghcr.io/mailcow/dovecot:2.3.21.1-1|Up 23 hours
+  mailcowdockerized-postfix-mailcow-1|ghcr.io/mailcow/postfix:3.7.11-1|Up 23 hours
+  mailcowdockerized-php-fpm-mailcow-1|ghcr.io/mailcow/phpfpm:8.2.29-1|Up 23 hours
+  mailcowdockerized-mysql-mailcow-1|mariadb:10.11|Up 23 hours
+  mailcowdockerized-postfix-tlspol-mailcow-1|ghcr.io/mailcow/postfix-tlspol:1.8.22|Up 23 hours
+  mailcowdockerized-redis-mailcow-1|redis:7.4.6-alpine|Up 23 hours
+  mailcowdockerized-clamd-mailcow-1|ghcr.io/mailcow/clamd:1.71|Up 16 hours (healthy)
+  mailcowdockerized-memcached-mailcow-1|memcached:alpine|Up 23 hours
+  mailcowdockerized-sogo-mailcow-1|ghcr.io/mailcow/sogo:5.12.4-1|Up 23 hours
+  mailcowdockerized-unbound-mailcow-1|ghcr.io/mailcow/unbound:1.24|Up 23 hours (healthy)
+  mailcowdockerized-dockerapi-mailcow-1|ghcr.io/mailcow/dockerapi:2.11|Up 23 hours
+  mailcowdockerized-netfilter-mailcow-1|ghcr.io/mailcow/netfilter:1.63|Up 23 hours
+  mailcowdockerized-olefy-mailcow-1|ghcr.io/mailcow/olefy:1.15|Up 23 hours
+  vikunja|vikunja/vikunja:latest|Up 2 days
+  memos|neosmemo/memos:stable|Up 2 days
+  step-ca|smallstep/step-ca:latest|Up 2 days (healthy)
+  glance|glanceapp/glance|Up 23 hours
+  openmemory-openmemory-1|openmemory-openmemory|Up 2 days (healthy)
+  dockpeek|dockpeek/dockpeek:latest|Up 2 days (healthy)
+  dockge-dockge-1|louislam/dockge:1|Up 23 hours (healthy)
+  qdrant|qdrant/qdrant:v1.14.1|Up 2 days
+
+--- Shark (10.0.0.31) ---
+hostname: TitanShark
+OLLAMA:
+  Error: could not connect to ollama server, run 'ollama serve' to start it
+GPU:
+  NVIDIA GeForce RTX 3060, 12288 MiB, 11585 MiB used
+DOCKER:
+  permission denied while trying to connect to the docker API at unix:///var/run/docker.sock

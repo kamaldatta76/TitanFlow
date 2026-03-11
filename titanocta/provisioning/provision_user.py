@@ -23,6 +23,37 @@ def load_tier_config(config_path: str | os.PathLike[str] | None = None) -> dict[
     return data
 
 
+def get_user_record(
+    user_id: str,
+    *,
+    db_path: str | os.PathLike[str] | None = None,
+) -> dict[str, object] | None:
+    db = Path(db_path) if db_path else DEFAULT_DB_PATH
+    conn = _connect(db)
+    _ensure_schema(conn)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("select * from octa_users where user_id = ?", (user_id,)).fetchone()
+    conn.close()
+    if row is None:
+        return None
+    return _row_to_user_record(row)
+
+
+def append_audit_event(
+    user_id: str,
+    event_type: str,
+    metadata: dict[str, object],
+    *,
+    db_path: str | os.PathLike[str] | None = None,
+) -> None:
+    db = Path(db_path) if db_path else DEFAULT_DB_PATH
+    conn = _connect(db)
+    _ensure_schema(conn)
+    _append_audit(conn, user_id, event_type, metadata)
+    conn.commit()
+    conn.close()
+
+
 def provision_user(
     user_id: str,
     tier: str,
@@ -57,8 +88,9 @@ def provision_user(
             user_id, email, octa_key, tier, status, credit_limit_monthly, credit_used,
             provider_mode, available_models, excluded_models, mode, auto_strategy,
             warning_thresholds, hard_cap, soft_cap_strategy, local_ollama_configured,
+            redirect_to_thor, content_filter,
             provisioned_at, updated_at
-        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         on conflict(user_id) do update set
             email = excluded.email,
             tier = excluded.tier,
@@ -73,6 +105,8 @@ def provision_user(
             hard_cap = excluded.hard_cap,
             soft_cap_strategy = excluded.soft_cap_strategy,
             local_ollama_configured = excluded.local_ollama_configured,
+            redirect_to_thor = excluded.redirect_to_thor,
+            content_filter = excluded.content_filter,
             updated_at = excluded.updated_at
         """,
         (
@@ -92,6 +126,8 @@ def provision_user(
             1 if routing_config["hard_cap"] else 0,
             routing_config["soft_cap_strategy"],
             1 if routing_config["local_ollama_configured"] else 0,
+            1 if routing_config["redirect_to_thor"] else 0,
+            routing_config["content_filter"],
             now,
             now,
         ),
@@ -123,7 +159,7 @@ def cancel_user(
         """
         select octa_key, tier, available_models, excluded_models, mode, auto_strategy,
                credit_limit_monthly, warning_thresholds, hard_cap, soft_cap_strategy,
-               provider_mode, local_ollama_configured
+               provider_mode, local_ollama_configured, redirect_to_thor, content_filter
         from octa_users where user_id = ?
         """,
         (user_id,),
@@ -158,6 +194,8 @@ def cancel_user(
             "hard_cap": bool(row[8]),
             "provider_mode": row[10],
             "local_ollama_configured": bool(row[11]),
+            "redirect_to_thor": bool(row[12]),
+            "content_filter": row[13],
         },
         "provisioned_at": now,
         "status": "cancelled",
@@ -182,6 +220,8 @@ def _build_routing_config(
         "hard_cap": bool(defaults["hard_cap"]),
         "provider_mode": str(defaults["provider_mode"]),
         "local_ollama_configured": bool(defaults["local_ollama_configured"]),
+        "redirect_to_thor": bool(tier_config.get("redirect_to_thor", False)),
+        "content_filter": tier_config.get("content_filter"),
     }
 
 
@@ -210,6 +250,8 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             hard_cap integer not null,
             soft_cap_strategy text,
             local_ollama_configured integer not null,
+            redirect_to_thor integer not null default 0,
+            content_filter text,
             provisioned_at text not null,
             updated_at text not null
         )
@@ -226,6 +268,8 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    _ensure_column(conn, "octa_users", "redirect_to_thor", "integer not null default 0")
+    _ensure_column(conn, "octa_users", "content_filter", "text")
 
 
 def _append_audit(conn: sqlite3.Connection, user_id: str, event_type: str, metadata: dict[str, object]) -> None:
@@ -233,6 +277,37 @@ def _append_audit(conn: sqlite3.Connection, user_id: str, event_type: str, metad
         "insert into octa_audit (user_id, timestamp, event_type, metadata) values (?, ?, ?, ?)",
         (user_id, _utc_now(), event_type, json.dumps(metadata, sort_keys=True)),
     )
+
+
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+    cols = [r[1] for r in conn.execute(f"pragma table_info({table})").fetchall()]
+    if column not in cols:
+        conn.execute(f"alter table {table} add column {column} {definition}")
+
+
+def _row_to_user_record(row: sqlite3.Row) -> dict[str, object]:
+    return {
+        "user_id": row["user_id"],
+        "email": row["email"],
+        "octa_key": row["octa_key"],
+        "tier": row["tier"],
+        "status": row["status"],
+        "credit_limit_monthly": float(row["credit_limit_monthly"]),
+        "credit_used": float(row["credit_used"]),
+        "provider_mode": row["provider_mode"],
+        "available_models": json.loads(row["available_models"] or "[]"),
+        "excluded_models": json.loads(row["excluded_models"] or "[]"),
+        "mode": row["mode"],
+        "auto_strategy": row["auto_strategy"],
+        "warning_thresholds": json.loads(row["warning_thresholds"] or "[]"),
+        "hard_cap": bool(row["hard_cap"]),
+        "soft_cap_strategy": row["soft_cap_strategy"],
+        "local_ollama_configured": bool(row["local_ollama_configured"]),
+        "redirect_to_thor": bool(row["redirect_to_thor"]),
+        "content_filter": row["content_filter"],
+        "provisioned_at": row["provisioned_at"],
+        "updated_at": row["updated_at"],
+    }
 
 
 def _generate_octa_key() -> str:
