@@ -1,0 +1,40 @@
+[Unit]
+Description=Octa Context Engine — persistent agent memory
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=kamaldatta
+Group=kamaldatta
+WorkingDirectory=/home/kamaldatta/octa-context
+
+# ── Core config ───────────────────────────────────────────────
+Environment=NODE_ENV=production
+Environment=TITANFLOW_CONTEXT_PORT=7474
+Environment=TITANFLOW_CONTEXT_HOST=127.0.0.1
+Environment=TITANFLOW_CONTEXT_DB=/home/kamaldatta/.octa/context.db
+Environment=TITANFLOW_CONTEXT_SURFACE=octa
+
+# Optional auth token. Leave empty for local-only loopback mode.
+# If set, mirror it in TITANFLOW_CONTEXT_TOKEN where the hook runs.
+Environment=TITANFLOW_CONTEXT_TOKEN=
+
+# Which agent this instance is saving for (change per-node if needed)
+Environment=TITANFLOW_AGENT_ID=ollie
+
+ExecStart=/usr/bin/node server.js
+
+# Restart policy
+Restart=always
+RestartSec=5
+StartLimitInterval=60
+StartLimitBurst=5
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=octa-context
+
+[Install]
+WantedBy=multi-user.target
