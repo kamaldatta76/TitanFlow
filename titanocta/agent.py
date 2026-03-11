@@ -10,6 +10,7 @@ import sqlite3
 import time
 from typing import Any
 
+from .context import ContextInjector, ContextStore, MemoryFlusher
 from .credits import CreditMiddleware
 from .credits.credit_events import emit_credit_event
 from .model_router import ModelRouter, RoutingProfile
@@ -45,6 +46,10 @@ class TitanOctaAgentRuntime:
         model_router: ModelRouter | None = None,
         provisioning_db_path: str | None = None,
         provisioned_user_id: str | None = None,
+        context_store: ContextStore | None = None,
+        context_injector: ContextInjector | None = None,
+        memory_flusher: MemoryFlusher | None = None,
+        context_db_path: str | None = None,
     ) -> None:
         self._governance = governance
         self._bus = bus
@@ -63,6 +68,13 @@ class TitanOctaAgentRuntime:
         self._provisioned_user_id = provisioned_user_id
         self._credit_middleware = credit_middleware or CreditMiddleware(self._provisioning_db_path)
         self._model_router = model_router or ModelRouter()
+        self._context_db_path = Path(
+            context_db_path
+            or os.environ.get("TITANOCTA_CONTEXT_DB", "~/.titanocta/context.sqlite")
+        ).expanduser()
+        self._context_store = context_store or ContextStore(self._context_db_path)
+        self._context_injector = context_injector or ContextInjector(self._context_store, max_items=5, min_score=0.35)
+        self._memory_flusher = memory_flusher or MemoryFlusher(self._context_store, soft_token_limit=1200, min_score=0.35)
         if self._db is not None and hasattr(self._governance, "install_decision_guard"):
             self._governance.install_decision_guard(self._kernel_guard)
 
@@ -147,6 +159,14 @@ class TitanOctaAgentRuntime:
             )
         if not route_decision.allowed:
             return route_decision.reason
+        self._context_store.add_entry(
+            user_id=billing_user,
+            session_id=room_id,
+            role="user",
+            content=intent,
+            score=0.9,
+        )
+        injected = self._context_injector.inject(user_id=billing_user, session_id=room_id)
         try:
             decision_id = await self._governance.create_decision(intent=intent, actor=actor, room_id=room_id)
         except PermissionError as exc:
@@ -157,7 +177,20 @@ class TitanOctaAgentRuntime:
                 f"titanocta:user:{actor}",
                 {"actor": actor, "last_room_id": room_id, "last_intent": intent, "updated_at_ms": int(time.time() * 1000)},
             )
-        response = await self._call_model(intent, route, model_name=route_decision.model)
+        response = await self._call_model(
+            intent,
+            route,
+            model_name=route_decision.model,
+            injected_context=injected.as_prompt_block(),
+        )
+        self._context_store.add_entry(
+            user_id=billing_user,
+            session_id=room_id,
+            role="assistant",
+            content=response,
+            score=0.85,
+        )
+        self._memory_flusher.flush_if_needed(user_id=billing_user, session_id=room_id)
         self._debit_if_managed(
             user_id=billing_user,
             intent=intent,
@@ -193,17 +226,25 @@ class TitanOctaAgentRuntime:
         )
         return response
 
-    async def _call_model(self, intent: str, route: TitanOctaRoute, *, model_name: str) -> str:
+    async def _call_model(
+        self,
+        intent: str,
+        route: TitanOctaRoute,
+        *,
+        model_name: str,
+        injected_context: str = "",
+    ) -> str:
         """Call Ollama with a system prompt shaped by the governance route."""
         try:
             import ollama  # noqa: PLC0415 — lazy import, ollama is a hard dep post-install
             client = ollama.AsyncClient(host=self._ollama_host)
+            messages = [{"role": "system", "content": self._system_for_route(route)}]
+            if injected_context:
+                messages.append({"role": "system", "content": injected_context})
+            messages.append({"role": "user", "content": intent})
             response = await client.chat(
                 model=model_name,
-                messages=[
-                    {"role": "system", "content": self._system_for_route(route)},
-                    {"role": "user", "content": intent},
-                ],
+                messages=messages,
             )
             return str(response.message.content).strip()
         except Exception as exc:  # noqa: BLE001
