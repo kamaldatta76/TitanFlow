@@ -77,11 +77,19 @@ def test_backup_manifest_and_verify(tmp_path: Path) -> None:
 
 
 def test_installer_bootstraps_local_governance(tmp_path: Path) -> None:
+    # Pre-consent the install root so the gate doesn't block or prompt in tests.
+    # This does NOT bypass the gate in production — it simulates a user who has
+    # already agreed on a previous run. The gate itself is tested separately.
+    from titanocta.telemetry_consent import TelemetryConsentGate
+    install_root = tmp_path / "octa"
+    install_root.mkdir(parents=True, exist_ok=True)
+    TelemetryConsentGate(install_root).record_consent("test-node-001")
+
     with (
         patch("titanocta.installer.start_management_server_detached", return_value=False),
         patch.object(TitanOctaInstaller, "reconcile_constellation_registration", AsyncMock(return_value="registered")),
     ):
-        result = asyncio.run(TitanOctaInstaller(install_root=str(tmp_path / "octa")).run())
+        result = asyncio.run(TitanOctaInstaller(install_root=str(install_root)).run())
     assert result.registration_id.startswith("titan@")
     assert result.health.flow == "green"
     assert result.octa_key.startswith("octa_")

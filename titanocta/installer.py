@@ -14,15 +14,23 @@ import httpx
 
 from .agent import TitanOctaAgentRuntime
 from .backup import BackupManager
-from .config import CONSTELLATION_ONBOARDING_HOSTS, MANAGEMENT_HOST, MANAGEMENT_PORT, TIER_FREE, recommended_model_for_class
+from .config import CONSTELLATION_ONBOARDING_HOSTS, MANAGEMENT_HOST, MANAGEMENT_PORT, recommended_model_for_class
 from .hardware import HardwareProfile, detect_hardware
 from .local_governance import bootstrap_local_governance
 from .management import start_management_server_detached, titanocta_version
+from .programs import (
+    PROGRAM_MULTI,
+    default_install_root,
+    default_tier_for_program,
+    get_program_definition,
+    normalize_program_mode,
+)
 from .provisioning import provision_user
 from .remote_token import RemoteAttachTokenManager
 from .retrieval import GroundedRetriever
 from .routing import TitanOctaRouter
 from .tai import TAi
+from .telemetry_consent import ConsentRequired, TelemetryConsentGate
 from .tier_guard import TierGuard
 
 
@@ -38,6 +46,7 @@ class InstallerHealth:
 
 @dataclass(frozen=True)
 class InstallerResult:
+    program_mode: str
     tier: str
     profile: HardwareProfile
     attach_mode: str
@@ -64,19 +73,23 @@ class TitanOctaInstaller:
         *,
         governance: Any | None = None,
         bus: Any | None = None,
+        program_mode: str | None = None,
+        tier: str | None = None,
         install_root: str | None = None,
         attach_secret: str = "titanocta-dev-secret",
     ) -> None:
         self._governance = governance
         self._bus = bus
         self._db = None
-        resolved_root = install_root or os.environ.get("TITANOCTA_INSTALL_ROOT", "~/.titanocta")
+        self._program_mode = normalize_program_mode(program_mode or os.environ.get("TITANOCTA_PROGRAM_MODE"))
+        resolved_root = install_root or str(default_install_root(self._program_mode))
+        self._tier = tier or default_tier_for_program(self._program_mode)
         self._install_root = Path(resolved_root).expanduser()
         self._install_root.mkdir(parents=True, exist_ok=True)
         self._backup_manager = BackupManager(base_dir=str(self._install_root / "backups"))
         self._retriever = GroundedRetriever()
         self._router = TitanOctaRouter(audit_log_path=str(self._install_root / "routing-audit.jsonl"))
-        self._tier_guard = TierGuard(TIER_FREE)
+        self._tier_guard = TierGuard(self._tier)
         self._token_manager = RemoteAttachTokenManager(
             attach_secret,
             audit_log_path=str(self._install_root / "remote-token-audit.jsonl"),
@@ -85,10 +98,12 @@ class TitanOctaInstaller:
     async def run(
         self,
         *,
-        agent_name: str = "Titan",
+        agent_name: str | None = None,
         attach_mode: str = "local",
         manual_override: str | None = None,
     ) -> InstallerResult:
+        if not agent_name:
+            agent_name = "Titan" if self._program_mode != PROGRAM_MULTI else "TitanTeam"
         governance = self._governance
         bus = self._bus
         bootstrap_runtime = None
@@ -100,6 +115,16 @@ class TitanOctaInstaller:
             governance = bootstrap_runtime.governance
             bus = bootstrap_runtime.bus
             self._db = bootstrap_runtime.db
+
+        # ── CONSENT GATE ──────────────────────────────────────────────────────
+        # Mandatory on every first run. No agreement = no access.
+        # Collected: hardware specs, model, benchmark scores, deploy/crash stats.
+        # Never collected: prompts, sessions, API keys, memory.
+        # CL doctrine: plain list, plain consent, no "help us improve" vagueness.
+        _consent_gate = TelemetryConsentGate(self._install_root)
+        _consent_node_id = self._get_or_create_node_id()
+        _consent_gate.require_consent(_consent_node_id, interactive=True)
+        # ─────────────────────────────────────────────────────────────────────
 
         profile = detect_hardware()
         if manual_override:
@@ -114,7 +139,7 @@ class TitanOctaInstaller:
         owner_email = os.environ.get("TITANOCTA_OWNER_EMAIL", f"{agent_name.lower()}@local.titan")
         provisioning = provision_user(
             user_id=node_id,
-            tier=TIER_FREE,
+            tier=self._tier,
             email=owner_email,
             db_path=self._install_root / "provisioning.sqlite",
         )
@@ -134,7 +159,7 @@ class TitanOctaInstaller:
             node_id=profile.hostname,
             tier_guard=self._tier_guard,
             router=self._router,
-            tai=TAi(install_root=str(self._install_root), tier=TIER_FREE, current_model=active_model),
+            tai=TAi(install_root=str(self._install_root), tier=self._tier, current_model=active_model),
             model=active_model,
             provisioning_db_path=str(self._install_root / "provisioning.sqlite"),
             provisioned_user_id=node_id,
@@ -159,7 +184,8 @@ class TitanOctaInstaller:
 
         config_path = self._install_root / "config.json"
         result = InstallerResult(
-            tier=TIER_FREE,
+            program_mode=self._program_mode,
+            tier=self._tier,
             profile=profile,
             attach_mode=attach_mode,
             agent_name=agent_name,
@@ -184,6 +210,7 @@ class TitanOctaInstaller:
         if bootstrap_runtime is not None:
             await bootstrap_runtime.db.close()
         return InstallerResult(
+            program_mode=config.get("program_mode", self._program_mode),
             tier=config["tier"],
             profile=HardwareProfile(**config["profile"]),
             attach_mode=config["attach_mode"],
@@ -207,6 +234,8 @@ class TitanOctaInstaller:
         assets_dir.mkdir(parents=True, exist_ok=True)
         logo_path = assets_dir / "titanocta-logo.svg"
         self.render_logo_svg(logo_path)
+        program_def = get_program_definition(result.program_mode)
+        mode_caps = "1 user, 1 agent, 1 node." if result.program_mode != PROGRAM_MULTI else "Up to 25 users, 16 agents, 16 nodes."
         token_block = (
             f"<div class='token-box'>{html.escape(result.remote_token)}</div>"
             if result.remote_token
@@ -226,6 +255,7 @@ class TitanOctaInstaller:
             (
                 "Agent Config",
                 f"Agent name: {html.escape(result.agent_name)}",
+                f"<p>Program: {html.escape(program_def.label)} ({html.escape(result.program_mode)})</p>"
                 f"<p>Attach mode: {html.escape(result.attach_mode)}</p>{token_block}",
             ),
             (
@@ -252,7 +282,7 @@ class TitanOctaInstaller:
             (
                 "Ready",
                 "TitanOcta is running.",
-                "<p>Free tier capabilities: 1 user, 1 agent, 1 node.</p>"
+                f"<p>Tier capabilities: {mode_caps}</p>"
                 "<p>Upcoming: Voice / Talk mode, Pro + Ultra, Manager, Dash Pack, multi-agent orchestration, "
                 "team workspace, advanced memory graph, hosted connectors.</p>",
             ),
