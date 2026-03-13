@@ -2,6 +2,19 @@
 GOV-0001 — Governance Engine
 Room-scoped locks, response mutex, 12s deadlock timeout, HMAC event signing.
 Sequential panel streaming: Archie first, Charlie second per decision.
+
+PULSE-CHECK DOCTRINE (AC + CL + Papa, 2026-03-13)
+Every 5 session exchanges in an active dev lane:
+  1. Coordinated web search across all agents — scoped to current dev context
+  2. Each agent broadcasts findings to the full team
+  3. Each agent states a clear recommendation
+  4. No implementation change until joint team decision
+Trigger conditions (CL's fix — not a dumb counter):
+  - Active dev sessions only (not greeting / simple_question / general)
+  - Major branch or task changes
+  - Stalled or conflicted work
+Counter is global to the session (per room), not per agent.
+One coordinated pulse per trigger — not 6 independent searches.
 """
 
 import asyncio
@@ -537,6 +550,31 @@ def _sign(event: dict[str, Any]) -> str:
     ).hexdigest()
 
 
+def _is_active_dev_session(classification: str) -> bool:
+    """
+    True when the session is a real dev lane — not casual chat.
+    Pulse check only fires in active dev. CL's fix: no dumb counter on greetings.
+    """
+    return classification not in {"greeting", "simple_question", "general"}
+
+
+def _build_pulse_search_query(intent: str, classification: str) -> str:
+    """Build a focused web search query from the current dev context."""
+    lane_hints = {
+        "ui_frontend":    "React frontend UI",
+        "infra_backend":  "backend infrastructure deployment",
+        "code_and_infra": "full-stack development",
+        "product_strategy": "AI product strategy",
+        "reasoning":      "software architecture",
+        "golden_role_factory": "multi-agent AI systems",
+    }
+    lane = lane_hints.get(classification, "AI development")
+    # Trim intent to key terms — avoid leaking full prompt into search
+    words = [w for w in intent.lower().split() if len(w) > 3][:6]
+    context = " ".join(words) if words else "AI agent systems"
+    return f"latest 2026 {lane} {context}"
+
+
 class RoomState:
     """Per-room lock state. Typing lock and response mutex are independent."""
 
@@ -549,6 +587,34 @@ class RoomState:
         self._bus = bus
         self._lock = asyncio.Lock()
         self._deadlock_task: Optional[asyncio.Task] = None
+        # Pulse check — global exchange counter per room (not per agent)
+        self.dev_exchange_count: int = 0
+        self.pulse_pending: bool = False  # gate: True = joint decision required before next impl change
+        self.last_pulse_ms: int = 0
+
+    def increment_exchange(self, classification: str) -> bool:
+        """
+        Increment the dev exchange counter. Returns True if a pulse check should fire.
+        Only counts active dev sessions — greetings/casual chat don't advance the counter.
+        """
+        if not _is_active_dev_session(classification):
+            return False
+        self.dev_exchange_count += 1
+        if self.dev_exchange_count % 5 == 0:
+            return True
+        return False
+
+    def open_pulse_gate(self) -> None:
+        """Block implementation changes until team closes the gate."""
+        self.pulse_pending = True
+        self.last_pulse_ms = int(__import__("time").time() * 1000)
+
+    def close_pulse_gate(self) -> None:
+        """Team has reached joint decision — implementation is unblocked."""
+        self.pulse_pending = False
+
+    def pulse_gate_open(self) -> bool:
+        return self.pulse_pending
 
     async def set_typing(self, actor: str, is_typing: bool) -> None:
         """Set/release typing lock — only affects this room."""
@@ -765,7 +831,52 @@ class GovernanceEngine:
             "gov_route_selected", decision_id, room_id, actor,
             {"dispatch": dispatch_plan.to_metadata()},
         ))
+
+        # ── PULSE CHECK ───────────────────────────────────────────────────────
+        # Increment the room's dev exchange counter. If it hits a multiple of 5
+        # in an active dev session, fire a coordinated team pulse.
+        # CL's rule: never trigger on greetings/casual chat. One pulse per room,
+        # not per agent. Gate blocks impl changes until team reaches joint decision.
+        room = self._room(room_id)
+        should_pulse = room.increment_exchange(dispatch_plan.classification)
+        if should_pulse:
+            room.open_pulse_gate()
+            search_query = _build_pulse_search_query(intent, dispatch_plan.classification)
+            await self._bus.publish(self.make_event(
+                "pulse_check_triggered", decision_id, room_id, "governance",
+                {
+                    "trigger": "every_5_dev_exchanges",
+                    "exchange_count": room.dev_exchange_count,
+                    "search_query": search_query,
+                    "classification": dispatch_plan.classification,
+                    "doctrine": (
+                        "All agents: search web for latest on current dev context. "
+                        "Broadcast findings to team. State recommendation. "
+                        "No implementation change until joint team decision closes the gate."
+                    ),
+                    "gate": "pulse_pending — impl blocked until close_pulse_gate()",
+                    "required_agents": ["ollie", "flow", "mini", "cc", "cx"],
+                },
+            ))
+            logger.info(
+                "PULSE CHECK fired — room=%s exchange=%d query=%r gate=OPEN",
+                room_id, room.dev_exchange_count, search_query,
+            )
+
         return decision_id
+
+    def close_pulse_gate(self, room_id: str) -> None:
+        """
+        Call this when the team has reached a joint decision after a pulse check.
+        Unblocks implementation changes for the room.
+        """
+        room = self._room(room_id)
+        room.close_pulse_gate()
+        logger.info("PULSE GATE closed — room=%s impl unblocked", room_id)
+
+    def pulse_gate_open(self, room_id: str) -> bool:
+        """True if a pulse check is pending and impl changes are gated."""
+        return self._room(room_id).pulse_gate_open()
 
     def get_room_state(self, room_id: str) -> dict[str, Any]:
         r = self._room(room_id)
@@ -775,6 +886,10 @@ class GovernanceEngine:
             "typing_actor": r.typing_actor,
             "response_mutex": r.response_mutex,
             "active_panel": r.active_panel,
+            # Pulse check state
+            "dev_exchange_count": r.dev_exchange_count,
+            "pulse_pending": r.pulse_pending,
+            "last_pulse_ms": r.last_pulse_ms,
         }
 
     async def set_typing(self, room_id: str, actor: str, is_typing: bool) -> None:

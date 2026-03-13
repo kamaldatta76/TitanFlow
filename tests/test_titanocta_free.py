@@ -20,10 +20,13 @@ from titanocta.tier_guard import TierGuard
 
 
 def test_tier_guard_blocks_free_overages() -> None:
+    # Free tier = 2 agents (Octa pair doctrine, locked 2026-03-13)
     guard = TierGuard()
-    ok = guard.enforce(users=1, agents=1, nodes=1)
-    blocked = guard.enforce(users=1, agents=2, nodes=1)
-    assert ok.allowed is True
+    ok_one   = guard.enforce(users=1, agents=1, nodes=1)
+    ok_two   = guard.enforce(users=1, agents=2, nodes=1)
+    blocked  = guard.enforce(users=1, agents=3, nodes=1)
+    assert ok_one.allowed is True
+    assert ok_two.allowed is True   # 2 agents is the free tier ceiling
     assert blocked.allowed is False
     assert blocked.reason == "agents_limit_exceeded"
 
