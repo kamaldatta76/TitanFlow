@@ -72,6 +72,19 @@ def test_mentions_override_classifier() -> None:
     assert plan.execution_targets == ()
 
 
+def test_mini_mention_routes_to_scout_lane() -> None:
+    plan = governance_engine._build_dispatch_plan(
+        "@Mini run a quick preflight triage on this bug."
+    )
+
+    assert plan.source == "mention"
+    assert plan.mention_target == "mini"
+    assert plan.primary_agent == "charlie"
+    assert plan.response_agents == ("charlie",)
+    assert plan.execution_targets == ("mini",)
+    assert plan.mode == "spec_then_dispatch"
+
+
 def test_code_and_infra_dispatches_in_parallel() -> None:
     plan = governance_engine._build_dispatch_plan(
         "Fix the ATLAS chatbox CSS and deploy the update on Mercury."
@@ -206,6 +219,17 @@ def test_issue_triage_prompt_routes_to_reasoning() -> None:
 
     assert plan.classification == "reasoning"
     assert plan.response_agents == ("archie", "charlie")
+
+
+def test_scout_prep_prompt_routes_to_mini_without_authority() -> None:
+    plan = governance_engine._build_dispatch_plan(
+        "Do a quick preflight summary and recon on this queue."
+    )
+
+    assert plan.classification == "scout_prep"
+    assert plan.primary_agent == "charlie"
+    assert plan.response_agents == ("charlie",)
+    assert plan.execution_targets == ("mini",)
 
 
 def test_cc_tasks_auto_fork_to_ollie_and_flow() -> None:

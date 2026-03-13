@@ -114,6 +114,7 @@ MENTION_TARGETS = {
     "@chex": "cx",
     "@ollie": "ollie",
     "@flow": "flow",
+    "@mini": "mini",
 }
 GREETING_WORDS = {"hello", "hi", "hey", "yo", "sup", "morning", "afternoon", "evening"}
 CHECKIN_PHRASES = (
@@ -140,6 +141,10 @@ REASONING_TERMS = {
     "architectural", "coherence", "governance", "review", "decision", "spec",
     "proposal", "plan", "design", "investigate", "issue", "problem", "broken",
     "failing", "failure", "timeout", "timing out",
+}
+SCOUT_TERMS = {
+    "triage", "preflight", "pre-flight", "quick scan", "scan first", "summarize",
+    "summary", "recon", "reconnaissance", "first pass", "first-pass",
 }
 CODE_TERMS = {
     "fix", "bug", "implement", "build", "refactor", "patch", "code", "function",
@@ -298,12 +303,15 @@ def _classify_intent(intent: str) -> str:
     has_infra = any(term in lowered for term in INFRA_TERMS)
     has_product = any(term in lowered for term in PRODUCT_TERMS)
     has_reasoning = any(term in lowered for term in REASONING_TERMS)
+    has_scout = any(term in lowered for term in SCOUT_TERMS)
     has_code = any(term in lowered for term in CODE_TERMS)
     has_action = any(term in lowered for term in ACTION_TERMS)
     has_diagnostic_phrase = any(phrase in lowered for phrase in DIAGNOSTIC_PHRASES)
 
     if _is_simple_greeting(intent):
         return "greeting"
+    if has_scout and not has_action:
+        return "scout_prep"
     if (has_reasoning or has_diagnostic_phrase) and not has_action:
         return "reasoning"
     if lowered.startswith(STRATEGY_QUESTION_PREFIXES) or has_product:
@@ -365,6 +373,20 @@ def _build_dispatch_plan(intent: str) -> DispatchPlan:
             reason="Explicit @Flow mention pins execution to Flow; Charlie translates first.",
             mention_target=mention_target,
         )
+    if mention_target == "mini":
+        return DispatchPlan(
+            source="mention",
+            classification="mention_override",
+            primary_agent="charlie",
+            response_agents=("charlie",),
+            execution_targets=("mini",),
+            mode="spec_then_dispatch",
+            reason=(
+                "Explicit @Mini mention routes to Mini scout lane only. "
+                "Mini is preflight utility, never chain authority; Charlie translates first."
+            ),
+            mention_target=mention_target,
+        )
 
     if _requires_factory_fork(intent, mention_target):
         return DispatchPlan(
@@ -418,6 +440,19 @@ def _build_dispatch_plan(intent: str) -> DispatchPlan:
             execution_targets=(),
             mode="direct_response",
             reason="Diagnosis and reasoning prompts get Archie's analysis before Charlie's verdict.",
+        )
+    if classification == "scout_prep":
+        return DispatchPlan(
+            source="classifier",
+            classification=classification,
+            primary_agent="charlie",
+            response_agents=("charlie",),
+            execution_targets=("mini",),
+            mode="spec_then_dispatch",
+            reason=(
+                "Scout/preflight requests go through Mini utility lane for cheap prep; "
+                "Charlie remains decision authority."
+            ),
         )
     if classification == "ui_frontend":
         return DispatchPlan(

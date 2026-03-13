@@ -43,9 +43,12 @@ def test_router_uses_governance_classifier() -> None:
     router = TitanOctaRouter(audit_log_path="/tmp/titanocta-routing-audit.jsonl")
     greeting = router.route("Atlas are you here?")
     mixed = router.route("Fix the ATLAS chatbox CSS and deploy the update on Mercury.")
+    scout = router.route("Do a quick preflight summary and recon on this queue.")
     assert greeting.primary_agent == "charlie"
     assert greeting.execution_targets == ()
     assert mixed.execution_targets == ("ollie", "flow")
+    assert scout.execution_targets == ("mini",)
+    assert scout.classification == "scout_prep"
 
 
 def test_router_enforces_golden_role_for_cc_chex_tasks() -> None:
